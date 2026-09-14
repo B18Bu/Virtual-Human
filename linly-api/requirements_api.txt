@@ -1,0 +1,8 @@
+# FastAPI 服务自身的依赖（与 Linly-Talker 的 requirements 相互独立）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+
+# 仅冒烟测试用
+httpx>=0.27

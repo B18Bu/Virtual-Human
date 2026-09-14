@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linly-Talker 数字人 · 效果页</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --panel2: #1f232c; --line: #2b303b;
+    --fg: #e6e8ec; --dim: #9aa3b2; --accent: #4a8cff; --ok: #35c07a;
+    --warn: #e0a33a; --err: #e5544b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 22px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .badge {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  }
+  .badge.ok { color: var(--ok); border-color: #23543d; }
+  .badge.err { color: var(--err); border-color: #5c2b28; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 14px; color: var(--dim); font-weight: 600; letter-spacing: .3px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 6px; }
+  input[type=text], input[type=password], textarea, select {
+    width: 100%; background: var(--panel2); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 9px 11px;
+    font: inherit; outline: none;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 74px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 200px; }
+  .field { margin-bottom: 14px; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { background: #33405a; color: #8b95a8; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--fg); font-weight: 400; }
+  #drop {
+    border: 1px dashed var(--line); border-radius: 8px; padding: 18px;
+    text-align: center; color: var(--dim); cursor: pointer; background: var(--panel2);
+  }
+  #drop.hot { border-color: var(--accent); color: var(--fg); }
+  #preview { max-height: 190px; border-radius: 8px; margin-top: 12px; display: none; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .stage { display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); margin-top: 9px; }
+  video { width: 100%; border-radius: 8px; background: #000; margin-top: 4px; }
+  .msg { padding: 11px 13px; border-radius: 7px; font-size: 13px; margin-top: 12px; display: none; }
+  .msg.err { background: #2a1a19; border: 1px solid #5c2b28; color: #ffb4ad; display: block; }
+  .msg.ok  { background: #16241d; border: 1px solid #23543d; color: #8ee0b4; display: block; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .meta { font-size: 12px; color: var(--dim); margin-top: 10px; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Linly-Talker 数字人</h1>
+    <span class="badge" id="health">检查服务中…</span>
+  </header>
+
+  <div class="card">
+    <h2>接口密钥</h2>
+    <div class="field">
+      <input type="password" id="key" placeholder="粘贴 X-API-Key">
+      <div class="hint">
+        密钥只存在本机浏览器（localStorage），不会写进页面。
+        在服务器上执行 <code>cat /root/autodl-tmp/linly-api/.api_key</code> 获取。
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>生成口播视频</h2>
+
+    <div class="field">
+      <label>人像图片</label>
+      <div id="drop">点击选择，或把图片拖到这里<br><span style="font-size:12px">支持 png / jpg / jpeg / bmp / webp，≤10MB</span></div>
+      <input type="file" id="file" accept="image/*" hidden>
+      <img id="preview" alt="预览">
+    </div>
+
+    <div class="field">
+      <label>播报文本（中文）</label>
+      <textarea id="text">大家好，我是数字人小美，很高兴认识你。</textarea>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>驱动方式</label>
+        <select id="mode">
+          <option value="sadtalker">sadtalker —— 图片原生，推荐</option>
+          <option value="auto">auto —— 当前等同 sadtalker</option>
+          <option value="musetalk">musetalk —— 实测口型不动，勿用</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>音色（可留空）</label>
+        <input type="text" id="voice" placeholder="留空=默认女声；也可填 edge:zh-CN-YunxiNeural">
+      </div>
+    </div>
+
+    <button id="go">开始生成</button>
+    <div class="hint">首个任务要等模型加载（约 35 秒），之后每个任务约 16～18 秒。</div>
+    <div class="msg" id="err"></div>
+    <div class="msg" id="done"></div>
+  </div>
+
+  <div class="card" id="progCard" style="display:none">
+    <h2>进度</h2>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="stage"><span id="stage">已提交，排队中…</span><span id="elapsed">0.0s</span></div>
+  </div>
+
+  <div class="card" id="outCard" style="display:none">
+    <h2>结果</h2>
+    <video id="video" controls playsinline></video>
+    <div class="meta" id="meta"></div>
+    <div style="margin-top:14px"><a id="dl" download><button class="ghost">下载 mp4</button></a></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const keyEl = $('key'), fileEl = $('file'), dropEl = $('drop'), prevEl = $('preview');
+
+  // 密钥持久化：只存本机，不写进页面（页面是公开可达的，绝不能内嵌密钥）
+  keyEl.value = localStorage.getItem('linly_key') || '';
+  keyEl.addEventListener('change', () => {
+    localStorage.setItem('linly_key', keyEl.value.trim());
+    checkHealth();
+  });
+
+  // ---------------- 服务健康状态 ----------------
+  async function checkHealth() {
+    const el = $('health');
+    try {
+      const r = await fetch('/api/v1/health');
+      const h = await r.json();
+      const real = h.pipeline_impl === 'linly-talker';
+      el.textContent = real
+        ? `就绪 · ${h.gpu_name || 'GPU'} · ${h.vram_gb || '?'}GB`
+        : `占位实现（${h.pipeline_impl}），模型链路未接通`;
+      el.className = 'badge ' + (real ? 'ok' : 'err');
+    } catch (e) {
+      el.textContent = '服务不可达';
+      el.className = 'badge err';
+    }
+  }
+  checkHealth();
+
+  // ---------------- 选图 ----------------
+  let picked = null;
+  function pick(f) {
+    if (!f) return;
+    if (!f.type.startsWith('image/')) { showErr('请选择图片文件'); return; }
+    if (f.size > 10 * 1024 * 1024) { showErr('图片超过 10MB 上限'); return; }
+    picked = f;
+    prevEl.src = URL.createObjectURL(f);
+    prevEl.style.display = 'block';
+    dropEl.textContent = f.name;
+    hideErr();
+  }
+  dropEl.addEventListener('click', () => fileEl.click());
+  fileEl.addEventListener('change', () => pick(fileEl.files[0]));
+  ['dragenter', 'dragover'].forEach(t => dropEl.addEventListener(t, e => {
+    e.preventDefault(); dropEl.classList.add('hot');
+  }));
+  ['dragleave', 'drop'].forEach(t => dropEl.addEventListener(t, e => {
+    e.preventDefault(); dropEl.classList.remove('hot');
+  }));
+  dropEl.addEventListener('drop', e => pick(e.dataTransfer.files[0]));
+
+  // ---------------- 提示 ----------------
+  const errEl = $('err'), doneEl = $('done');
+  function showErr(m) { errEl.textContent = m; errEl.className = 'msg err'; }
+  function hideErr() { errEl.className = 'msg'; }
+  function showDone(m) { doneEl.innerHTML = m; doneEl.className = 'msg ok'; }
+
+  // ---------------- 提交 + 轮询 ----------------
+  let timer = null;
+  $('go').addEventListener('click', async () => {
+    hideErr(); doneEl.className = 'msg';
+    const key = keyEl.value.trim();
+    if (!key) { showErr('请先填写 X-API-Key'); return; }
+    if (!picked) { showErr('请先选择一张人像图片'); return; }
+    const text = $('text').value.trim();
+    if (!text) { showErr('播报文本不能为空'); return; }
+
+    const fd = new FormData();
+    fd.append('image', picked);
+    fd.append('text', text);
+    fd.append('mode', $('mode').value);
+    const voice = $('voice').value.trim();
+    if (voice) fd.append('voice', voice);
+
+    const btn = $('go');
+    btn.disabled = true; btn.textContent = '提交中…';
+    $('outCard').style.display = 'none';
+    $('progCard').style.display = 'block';
+    setProgress(0, '已提交，排队中…');
+
+    const t0 = Date.now();
+    if (timer) clearInterval(timer);
+    // 计时器独立于轮询，这样即使某一轮请求卡住，用户也能看到时间在走
+    timer = setInterval(() => {
+      $('elapsed').textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    }, 100);
+
+    let taskId;
+    try {
+      const r = await fetch('/api/v1/tasks/upload', {
+        method: 'POST', headers: { 'X-API-Key': key }, body: fd,
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(fmtErr(r.status, j));
+      taskId = j.task_id;
+    } catch (e) {
+      return fail(e.message, btn);
+    }
+
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/v1/tasks/${taskId}`, { headers: { 'X-API-Key': key } });
+        const j = await r.json();
+        if (!r.ok) throw new Error(fmtErr(r.status, j));
+
+        setProgress(j.progress || 0, j.stage || j.status);
+        if (j.status === 'succeeded') {
+          clearInterval(poll); clearInterval(timer);
+          finish(j, t0, btn);
+        } else if (j.status === 'failed' || j.status === 'canceled') {
+          clearInterval(poll); clearInterval(timer);
+          fail(`任务${j.status === 'canceled' ? '已取消' : '失败'}：${j.error || '未知原因'}`, btn);
+        }
+      } catch (e) {
+        clearInterval(poll); clearInterval(timer);
+        fail(e.message, btn);
+      }
+    }, 2000);
+  });
+
+  function fail(m, btn) {
+    showErr(m);
+    $('progCard').style.display = 'none';
+    btn.disabled = false; btn.textContent = '开始生成';
+  }
+
+  function finish(j, t0, btn) {
+    setProgress(1, '完成');
+    // result_url 是公网绝对地址；页面可能从内网/公网任意一侧打开，
+    // 只取路径走同源，避免把页面自己的 origin 写死。
+    let path;
+    try { path = new URL(j.result_url, location.origin).pathname; }
+    catch (e) { path = j.result_url; }
+
+    const v = $('video');
+    v.src = path;
+    $('dl').href = path;
+    $('dl').setAttribute('download', (j.task_id || 'result') + '.mp4');
+    const kb = (j.result_bytes || 0) / 1024;
+    $('meta').textContent =
+      `task_id ${j.task_id} · ${j.result_bytes} 字节（${kb.toFixed(0)} KB）· 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    $('outCard').style.display = 'block';
+    showDone(kb > 100
+      ? `生成成功：${kb.toFixed(0)} KB（满足 >100KB 验收线）`
+      : `生成成功，但只有 ${kb.toFixed(0)} KB，低于 100KB 验收线`);
+    btn.disabled = false; btn.textContent = '开始生成';
+  }
+
+  function setProgress(p, stage) {
+    $('bar').style.width = Math.round((p || 0) * 100) + '%';
+    $('stage').textContent = stage;
+  }
+
+  function fmtErr(status, j) {
+    if (status === 401) return '鉴权失败（401）：X-API-Key 不对，或没填';
+    if (status === 413) return '请求体过大（413）：换一张小一点的图片';
+    const d = j && j.detail;
+    if (typeof d === 'string') return `${status}：${d}`;
+    if (Array.isArray(d)) return `${status}：` + d.map(x => x.msg).join('；');
+    return `请求失败（HTTP ${status}）`;
+  }
+})();
+</script>
+</body>
+</html>

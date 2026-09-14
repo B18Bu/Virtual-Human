@@ -1,0 +1,38 @@
+# ---- 密钥与凭据：绝不允许进仓库 ----
+.api_key
+.webui_credentials
+*.token
+.github_token
+.env
+
+# ---- 运行时产物 ----
+outputs/
+uploads/
+logs/
+*.mp4
+*.wav
+*.mp3
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+
+# ---- 模型权重：本仓库不含权重，见 README 第二节 ----
+# GitHub 单文件上限 100MB，本项目有 30 个文件超过该限制
+Linly-Talker/
+checkpoints/
+*.pth
+*.pth.tar
+*.safetensors
+*.ckpt
+*.onnx
+*.bin
+*.pt
+!linly-api/app/static/*.html
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
