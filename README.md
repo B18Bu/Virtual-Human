@@ -684,6 +684,7 @@ rm -rf /root/autodl-tmp/.cache/pip   # 数据盘 2.3G
 
 | 现象 | 先查这里 |
 | --- | --- |
+| 对话界面点生成，页面上只显示「错误」两个字 | **先去 `logs/webui.log` 看真实报错**——「错误」只是 Gradio 的中文文案。<br>最常见的是界面下拉框与后端全局变量脱节（如 `AttributeError: 'Wav2Lipv2' object has no attribute 'test2'`）：`webui.py` 用**模块级全局变量**存当前模型，用 API 直接调 `*_model_change` 会让后端切走而界面不动。<br>跑 `deploy/fix_webui_state.py` 恢复，并把界面下拉框选成一致 |
 | 视频很小 / 只有一张脸 | `mode` 是否用了 `crop`？SadTalker 需 `full` 才回贴原图 |
 | 视频没声音 / ASR 返回空 | 量音轨 RMS（`deploy/_probe.py:audio_rms`）；静音一般是 TTS 的 volume 传错 |
 | 浏览器登不进 Gradio | `curl -s localhost:6008/ \| grep -o '"root":"[^"]*"'` 是否输出公网地址 |
