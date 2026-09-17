@@ -44,6 +44,9 @@ GPT_SOVITS_SOVITS = "GPT_SoVITS/pretrained_models/s2G488k.pth"
 COSYVOICE_SFT_DIR = "checkpoints/CosyVoice_ckpt/CosyVoice-300M-SFT"
 DEFAULT_EDGE_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_COSYVOICE_SPK = "中文女"
+# 微调音色的存放根目录（由 voice-train/pipeline.py 训练产出，**刻意在项目仓库之外**）。
+# ⚠️ 该路径不能含 "pretrained" 子串 —— 见下面 _gpt_sovits 里的注释。
+VOICES_ROOT = Path("/root/autodl-tmp/voices")
 # GPT-SoVITS 的语言参数用**中文名**当键（GPT_SoVITS.py:398 的 dict_language），
 # 传语言码 "zh" 会直接 KeyError。可选项就是下面这六个。
 GPT_SOVITS_LANGS = ("中文", "英文", "日文", "中英混合", "日英混合", "多语种混合")
@@ -279,6 +282,20 @@ class RealPipeline(BasePipeline):
             progress_cb(0.30, "语音合成完成")
             return f"gpt-sovits:{lang}", out
 
+        if engine == "finetuned":
+            voice_id, ref_wav, prompt_text, lang = param  # type: ignore[misc]
+            if not Path(ref_wav).is_file():
+                raise FileNotFoundError(
+                    f"微调音色的参考音频不存在（需服务器本地路径）：{ref_wav}")
+            progress_cb(0.06, f"语音合成（微调音色 {voice_id}）")
+            out = workdir / "tts.wav"
+            # 与 gptsovits 分支同理：参考音频 3~10 秒，语言必须传中文名。
+            # 区别只在于用哪个模型实例（微调权重 + 同一套底座 BERT/HuBERT）。
+            self._gpt_sovits(voice_id).predict(
+                ref_wav, prompt_text, lang, text, lang, "不切", save_path=str(out))
+            progress_cb(0.30, "语音合成完成")
+            return f"finetuned:{voice_id}", out
+
         raise ValueError(f"无法识别的 voice：{voice!r}")  # 兜底，_parse_voice 已校验
 
     @staticmethod
@@ -310,6 +327,24 @@ class RealPipeline(BasePipeline):
                 )
             return "gptsovits", (ref_wav, prompt_text, lang)
 
+        # 微调音色：finetuned:<音色名>|<参考音频>|<参考文本>[|<语言>]
+        # 刻意新开一个 head 而不是往 gptsovits: 的语法里插字段 —— 后者已经按 "|"
+        # 分割，插进去会破坏所有既有调用方。这个 head 是纯新增，零回归。
+        if lowered in ("finetuned", "finetune", "custom", "voice"):
+            voice_id, _, rest = tail.partition("|")
+            ref_wav, _, rest2 = rest.partition("|")
+            prompt_text, _, lang = rest2.partition("|")
+            if not (voice_id and ref_wav and prompt_text):
+                raise ValueError(
+                    "voice 需形如 finetuned:<音色名>|<参考音频>|<参考文本>[|<语言>]"
+                )
+            lang = (lang or DEFAULT_GPT_SOVITS_LANG).strip()
+            if lang not in GPT_SOVITS_LANGS:
+                raise ValueError(
+                    f"GPT-SoVITS 语言取值非法：{lang!r}（可选 {'/'.join(GPT_SOVITS_LANGS)}）"
+                )
+            return "finetuned", (voice_id, ref_wav, prompt_text, lang)
+
         # 便利写法：直接把 Edge 音色名丢进来（zh-CN-XiaoxiaoNeural 这类）。
         if "Neural" in raw or re.match(r"^[a-z]{2}-[A-Z]{2}-", raw):
             return "edge", raw
@@ -317,7 +352,8 @@ class RealPipeline(BasePipeline):
         raise ValueError(
             f"无法识别的 voice：{voice!r}；"
             "可用：留空/edge[:音色] / cosyvoice[:说话人] / "
-            "gptsovits:<参考音频>|<参考文本>[|<语言>]"
+            "gptsovits:<参考音频>|<参考文本>[|<语言>] / "
+            "finetuned:<音色名>|<参考音频>|<参考文本>[|<语言>]"
         )
 
     # ------------------------------------------------------------ 口型驱动
@@ -497,16 +533,58 @@ class RealPipeline(BasePipeline):
         logger.info("已把顶层 utils 纠正为 %s（原为 %s）", target,
                     getattr(wrong, "__file__", "未加载"))
 
-    def _gpt_sovits(self):
-        if "gptsovits" not in self._tts_cache:
-            logger.info("惰性加载 GPT-SoVITS（含 BERT + HuBERT + s1/s2 权重）")
+    @staticmethod
+    def _finetuned_paths(voice_id: str) -> tuple[str, str]:
+        """把音色名解析成 (gpt_ckpt, sovits_pth) 两个绝对路径。
+
+        约定：每个音色一个目录，里面固定叫 `gpt.ckpt` 与 `sovits.pth`
+        （训练完由 pipeline.py 的 register_voice 落成这个形状）。
+
+        ⚠️ 这里**不能**把目录放到 `GPT_SoVITS/pretrained_models/` 下：
+        `VITS/GPT_SoVITS.py:351` 有一句
+            `if ("pretrained" not in sovits_path): del vq_model.enc_q`
+        它是对**完整路径做子串匹配**。微调产物按上游约定本就不含 enc_q
+        （process_ckpt.py 的 savee 里 `if "enc_q" in key: continue`），
+        路径里带上 "pretrained" 会让判断走错分支，白留一份用不上的后验编码器。
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", voice_id or ""):
+            raise ValueError(f"音色名非法：{voice_id!r}（只允许字母/数字/下划线）")
+        d = VOICES_ROOT / voice_id
+        gpt, sovits = d / "gpt.ckpt", d / "sovits.pth"
+        if not gpt.is_file() or not sovits.is_file():
+            raise FileNotFoundError(
+                f"音色 {voice_id!r} 的权重不完整，期望 {gpt} 与 {sovits}。"
+                f"可先调 POST /api/v1/voices/{voice_id} 查看训练状态。"
+            )
+        return str(gpt), str(sovits)
+
+    def _gpt_sovits(self, voice_id: str | None = None):
+        """取 GPT-SoVITS 实例。voice_id 为 None 用底座（零样本），否则用微调音色。
+
+        按 voice_id 分档缓存（与 `_talker(head)` 同一形状）。注意每个音色会常驻一份
+        s1+s2 权重（约 240MB 显存）；共享的 BERT + HuBERT 只有一份，不随音色增长。
+        """
+        key = f"gptsovits:{voice_id}" if voice_id else "gptsovits"
+        if key not in self._tts_cache:
             from VITS import GPT_SoVITS
 
+            if voice_id:
+                gpt_path, sovits_path = self._finetuned_paths(voice_id)
+                logger.info("惰性加载微调音色 %s（%s）", voice_id, gpt_path)
+            else:
+                gpt_path, sovits_path = GPT_SOVITS_GPT, GPT_SOVITS_SOVITS
+                logger.info("惰性加载 GPT-SoVITS 底座（含 BERT + HuBERT + s1/s2 权重）")
+
+            # ⚠️ 必须在**每次** load_model 之前跑，不能只在首次入缓存时做：
+            # pickle 里引用的是顶层 `utils` 模块，而 `import TFG` 会把
+            # Musetalk/musetalk/utils/utils.py 注册成顶层 utils，
+            # 导致 torch.load 报 `Can't get attribute 'HParams'`。
+            # 该函数幂等（已正确时提前返回），放进 load 路径是安全的。
             self._restore_gptsovits_utils_module()
             model = GPT_SoVITS()
-            model.load_model(GPT_SOVITS_GPT, GPT_SOVITS_SOVITS)
-            self._tts_cache["gptsovits"] = model
-        return self._tts_cache["gptsovits"]
+            model.load_model(gpt_path, sovits_path)
+            self._tts_cache[key] = model
+        return self._tts_cache[key]
 
     def _talker(self, head: str):
         if head not in self._talker_cache:

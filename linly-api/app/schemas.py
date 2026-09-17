@@ -62,6 +62,54 @@ class TaskInfo(BaseModel):
     error: str | None = None
 
 
+class VoiceStatus(str, Enum):
+    ASR = "asr"              # 切片 + 语音识别中
+    REVIEWING = "reviewing"  # 等人工校对标注（可提交校对后开训）
+    TRAINING = "training"    # 训练中（几十分钟量级）
+    DONE = "done"            # 完成，可用 finetuned:<id> 调用
+    FAILED = "failed"
+
+
+class VoiceCreateResponse(BaseModel):
+    voice_id: str
+    status: VoiceStatus
+    poll_url: str
+    transcript_url: str
+    message: str
+
+
+class VoiceInfo(BaseModel):
+    voice_id: str
+    status: VoiceStatus
+    stage: str = ""
+    progress: float = Field(ge=0.0, le=1.0)
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    elapsed_seconds: float | None = None
+    source_name: str = ""
+    segments: int = 0
+    auto_train: bool = False
+    epochs_s1: int = 0
+    epochs_s2: int = 0
+    has_transcript: bool = False
+    model_ready: bool = False
+    usage: str = ""
+    error: str | None = None
+
+
+class TranscriptBody(BaseModel):
+    """提交人工校对后的标注。每行 `文件名<TAB>文本`。"""
+
+    transcript: str = Field(..., description="校对后的全文，每行「文件名<TAB>文本」")
+
+
+class TranscriptResponse(BaseModel):
+    voice_id: str
+    segments: int
+    transcript: str
+
+
 class HealthResponse(BaseModel):
     status: str
     gpu_available: bool

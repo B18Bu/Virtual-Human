@@ -24,11 +24,13 @@
   }
   .badge.ok { color: var(--ok); border-color: #23543d; }
   .badge.err { color: var(--err); border-color: #5c2b28; }
+  .badge.warn { color: var(--warn); border-color: #5c4a23; }
   .card {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: 10px; padding: 18px; margin-bottom: 16px;
   }
   .card h2 { font-size: 13px; margin: 0 0 14px; color: var(--dim); font-weight: 600; letter-spacing: .3px; }
+  .card h2 .tag { font-weight: 400; color: var(--dim); opacity: .7; }
   label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 6px; }
   input[type=text], input[type=password], textarea, select {
     width: 100%; background: var(--panel2); color: var(--fg);
@@ -37,6 +39,7 @@
   }
   input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   textarea { resize: vertical; min-height: 74px; }
+  textarea.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; min-height: 220px; white-space: pre; }
   .row { display: flex; gap: 14px; flex-wrap: wrap; }
   .row > div { flex: 1 1 200px; }
   .field { margin-bottom: 14px; }
@@ -47,11 +50,12 @@
   }
   button:disabled { background: #33405a; color: #8b95a8; cursor: not-allowed; }
   button.ghost { background: transparent; border: 1px solid var(--line); color: var(--fg); font-weight: 400; }
-  #drop {
+  button.sm { padding: 6px 12px; font-size: 13px; }
+  #drop, #adrop {
     border: 1px dashed var(--line); border-radius: 8px; padding: 18px;
     text-align: center; color: var(--dim); cursor: pointer; background: var(--panel2);
   }
-  #drop.hot { border-color: var(--accent); color: var(--fg); }
+  #drop.hot, #adrop.hot { border-color: var(--accent); color: var(--fg); }
   #preview { max-height: 190px; border-radius: 8px; margin-top: 12px; display: none; }
   .bar { height: 6px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
@@ -60,8 +64,22 @@
   .msg { padding: 11px 13px; border-radius: 7px; font-size: 13px; margin-top: 12px; display: none; }
   .msg.err { background: #2a1a19; border: 1px solid #5c2b28; color: #ffb4ad; display: block; }
   .msg.ok  { background: #16241d; border: 1px solid #23543d; color: #8ee0b4; display: block; }
+  .msg.warn{ background: #2a2317; border: 1px solid #5c4a23; color: #f0cd8a; display: block; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .meta { font-size: 12px; color: var(--dim); margin-top: 10px; word-break: break-all; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+  .check input { width: auto; }
+  ul.voices { list-style: none; margin: 0; padding: 0; }
+  ul.voices li {
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px;
+    border: 1px solid var(--line); border-radius: 7px; margin-bottom: 7px;
+    background: var(--panel2); font-size: 13px;
+  }
+  ul.voices li .nm { font-weight: 600; }
+  ul.voices li .sp { flex: 1; color: var(--dim); font-size: 12px; }
+  ol.steps { margin: 0 0 14px; padding-left: 20px; font-size: 13px; color: var(--dim); }
+  ol.steps li { margin-bottom: 3px; }
+  ol.steps b { color: var(--fg); }
 </style>
 </head>
 <body>
@@ -82,6 +100,7 @@
     </div>
   </div>
 
+  <!-- ==================== 生成口播视频 ==================== -->
   <div class="card">
     <h2>生成口播视频</h2>
 
@@ -103,12 +122,14 @@
         <select id="mode">
           <option value="sadtalker">sadtalker —— 图片原生，推荐</option>
           <option value="auto">auto —— 当前等同 sadtalker</option>
-          <option value="musetalk">musetalk —— 实测口型不动，勿用</option>
+          <option value="musetalk">musetalk —— 口型幅度小，实测可用</option>
+          <option value="wav2lip">wav2lip —— 最省显存</option>
         </select>
       </div>
       <div class="field">
         <label>音色（可留空）</label>
         <input type="text" id="voice" placeholder="留空=默认女声；也可填 edge:zh-CN-YunxiNeural">
+        <div class="hint" id="voiceHint">训练好自己的音色后，会在下方「我的音色」里出现，可一键填入。</div>
       </div>
     </div>
 
@@ -116,6 +137,73 @@
     <div class="hint">首个任务要等模型加载（约 35 秒），之后每个任务约 16～18 秒。</div>
     <div class="msg" id="err"></div>
     <div class="msg" id="done"></div>
+  </div>
+
+  <!-- ==================== 训练专属音色 ==================== -->
+  <div class="card">
+    <h2>训练专属音色 <span class="tag">—— 上传录音，训练一个你自己的声音</span></h2>
+
+    <ol class="steps">
+      <li><b>上传音频</b>：1～30 分钟干净人声，单人、无背景音乐、无回声</li>
+      <li><b>自动切片 + 语音识别</b>（约 1 分钟）</li>
+      <li><b>校对识别文本</b>：改掉同音错字 —— 这步不能省，错字会被训练进模型</li>
+      <li><b>训练</b>（几十分钟量级），完成后即可在上面「音色」里使用</li>
+    </ol>
+
+    <div class="field">
+      <label>训练音频</label>
+      <div id="adrop">点击选择，或把音频拖到这里<br><span style="font-size:12px">支持 wav / mp3 / m4a / flac / ogg / aac / wma，≤100MB</span></div>
+      <input type="file" id="afile" accept="audio/*,.wav,.mp3,.m4a,.flac" hidden>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>音色名（英文/数字，作为模型名）</label>
+        <input type="text" id="vname" placeholder="例如 myvoice">
+      </div>
+      <div class="field">
+        <label>训练轮数（留空用服务端默认）</label>
+        <input type="text" id="vepoch" placeholder="例如 8">
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" id="vauto">
+        跳过校对直接训练（省事，但 ASR 错字会被学进模型，不推荐）
+      </label>
+    </div>
+
+    <button id="vgo">开始训练</button>
+    <div class="msg" id="verr"></div>
+    <div class="msg" id="vmsg"></div>
+
+    <div id="vprog" style="display:none; margin-top:16px">
+      <div class="bar"><i id="vbar"></i></div>
+      <div class="stage"><span id="vstage">已提交…</span><span id="velapsed">0.0s</span></div>
+    </div>
+
+    <!-- 校对区：status=reviewing 时出现 -->
+    <div id="vreview" style="display:none; margin-top:18px">
+      <label>识别文本（每行「文件名 + TAB + 文本」—— <b>只改右侧文字</b>，别动左侧文件名、别增删行）</label>
+      <textarea id="vtext" class="mono" spellcheck="false"></textarea>
+      <div class="hint">
+        按 <code>Tab</code> 会插入一个制表符（不会跳到别的控件）。
+        改完点下面的按钮开始训练。识别有错字是正常的，务必逐行核对。
+      </div>
+      <div style="margin-top:12px">
+        <button id="vtrain">提交校对并开始训练</button>
+        <button class="ghost" id="vreload" style="margin-left:8px">重新拉取</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 我的音色 ==================== -->
+  <div class="card">
+    <h2>我的音色</h2>
+    <div id="vlistEmpty" class="hint">还没有训练过音色。用上面的「训练专属音色」创建一个。</div>
+    <ul class="voices" id="vlist"></ul>
+    <button class="ghost sm" id="vrefresh">刷新列表</button>
   </div>
 
   <div class="card" id="progCard" style="display:none">
@@ -136,12 +224,13 @@
 (() => {
   const $ = id => document.getElementById(id);
   const keyEl = $('key'), fileEl = $('file'), dropEl = $('drop'), prevEl = $('preview');
+  const getKey = () => keyEl.value.trim();
 
   // 密钥持久化：只存本机，不写进页面（页面是公开可达的，绝不能内嵌密钥）
   keyEl.value = localStorage.getItem('linly_key') || '';
   keyEl.addEventListener('change', () => {
     localStorage.setItem('linly_key', keyEl.value.trim());
-    checkHealth();
+    checkHealth(); loadVoices();
   });
 
   // ---------------- 服务健康状态 ----------------
@@ -161,6 +250,17 @@
     }
   }
   checkHealth();
+
+  // 统一错误文案（401/413/409 这类给一句人话，别让用户对着状态码猜）
+  function fmtErr(status, j) {
+    if (status === 401) return '鉴权失败（401）：X-API-Key 不对，或没填';
+    if (status === 413) return '文件过大（413）';
+    if (status === 409) return `状态冲突（409）：${(j && j.detail) || '当前状态不允许此操作'}`;
+    const d = j && j.detail;
+    if (typeof d === 'string') return `${status}：${d}`;
+    if (Array.isArray(d)) return `${status}：` + d.map(x => x.msg || x).join('；');
+    return `请求失败（HTTP ${status}）`;
+  }
 
   // ---------------- 选图 ----------------
   let picked = null;
@@ -184,17 +284,16 @@
   }));
   dropEl.addEventListener('drop', e => pick(e.dataTransfer.files[0]));
 
-  // ---------------- 提示 ----------------
   const errEl = $('err'), doneEl = $('done');
   function showErr(m) { errEl.textContent = m; errEl.className = 'msg err'; }
   function hideErr() { errEl.className = 'msg'; }
   function showDone(m) { doneEl.innerHTML = m; doneEl.className = 'msg ok'; }
 
-  // ---------------- 提交 + 轮询 ----------------
+  // ================= 生成口播视频 =================
   let timer = null;
   $('go').addEventListener('click', async () => {
     hideErr(); doneEl.className = 'msg';
-    const key = keyEl.value.trim();
+    const key = getKey();
     if (!key) { showErr('请先填写 X-API-Key'); return; }
     if (!picked) { showErr('请先选择一张人像图片'); return; }
     const text = $('text').value.trim();
@@ -229,7 +328,7 @@
       if (!r.ok) throw new Error(fmtErr(r.status, j));
       taskId = j.task_id;
     } catch (e) {
-      return fail(e.message, btn);
+      return failGen(e.message, btn);
     }
 
     const poll = setInterval(async () => {
@@ -244,16 +343,16 @@
           finish(j, t0, btn);
         } else if (j.status === 'failed' || j.status === 'canceled') {
           clearInterval(poll); clearInterval(timer);
-          fail(`任务${j.status === 'canceled' ? '已取消' : '失败'}：${j.error || '未知原因'}`, btn);
+          failGen(`任务${j.status === 'canceled' ? '已取消' : '失败'}：${j.error || '未知原因'}`, btn);
         }
       } catch (e) {
         clearInterval(poll); clearInterval(timer);
-        fail(e.message, btn);
+        failGen(e.message, btn);
       }
     }, 2000);
   });
 
-  function fail(m, btn) {
+  function failGen(m, btn) {
     showErr(m);
     $('progCard').style.display = 'none';
     btn.disabled = false; btn.textContent = '开始生成';
@@ -275,9 +374,10 @@
     $('meta').textContent =
       `task_id ${j.task_id} · ${j.result_bytes} 字节（${kb.toFixed(0)} KB）· 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`;
     $('outCard').style.display = 'block';
+    // 640x1024 的成片正常在 250~370KB。明显偏小多半是踩了 SadTalker 的 crop 模式
     showDone(kb > 100
-      ? `生成成功：${kb.toFixed(0)} KB（满足 >100KB 验收线）`
-      : `生成成功，但只有 ${kb.toFixed(0)} KB，低于 100KB 验收线`);
+      ? `生成成功：${kb.toFixed(0)} KB`
+      : `生成成功，但只有 ${kb.toFixed(0)} KB —— 偏小，检查是否误用了 crop 预处理`);
     btn.disabled = false; btn.textContent = '开始生成';
   }
 
@@ -286,14 +386,226 @@
     $('stage').textContent = stage;
   }
 
-  function fmtErr(status, j) {
-    if (status === 401) return '鉴权失败（401）：X-API-Key 不对，或没填';
-    if (status === 413) return '请求体过大（413）：换一张小一点的图片';
-    const d = j && j.detail;
-    if (typeof d === 'string') return `${status}：${d}`;
-    if (Array.isArray(d)) return `${status}：` + d.map(x => x.msg).join('；');
-    return `请求失败（HTTP ${status}）`;
+  // ================= 训练专属音色 =================
+  const aDrop = $('adrop'), aFile = $('afile');
+  let apicked = null, vTimer = null, vPolling = null, curVoice = null;
+
+  function pickAudio(f) {
+    if (!f) return;
+    if (f.size > 100 * 1024 * 1024) { showVErr('音频超过 100MB 上限'); return; }
+    apicked = f;
+    aDrop.textContent = f.name;
+    showVMsg('已选择音频，填好音色名后点「开始训练」', 'ok');
   }
+  aDrop.addEventListener('click', () => aFile.click());
+  aFile.addEventListener('change', () => pickAudio(aFile.files[0]));
+  ['dragenter', 'dragover'].forEach(t => aDrop.addEventListener(t, e => {
+    e.preventDefault(); aDrop.classList.add('hot');
+  }));
+  ['dragleave', 'drop'].forEach(t => aDrop.addEventListener(t, e => {
+    e.preventDefault(); aDrop.classList.remove('hot');
+  }));
+  aDrop.addEventListener('drop', e => pickAudio(e.dataTransfer.files[0]));
+
+  function showVErr(m) { const e = $('verr'); e.textContent = m; e.className = 'msg err'; }
+  function showVMsg(m, cls) { const e = $('vmsg'); e.textContent = m; e.className = 'msg ' + (cls || 'ok'); }
+  function hideVMsg() { $('vmsg').className = 'msg'; $('verr').className = 'msg'; }
+
+  // 校对框里按 Tab 应该插入制表符，而不是跳走焦点 —— 否则根本没法编辑
+  $('vtext').addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    const t = e.target, s = t.selectionStart, en = t.selectionEnd;
+    t.value = t.value.slice(0, s) + '\t' + t.value.slice(en);
+    t.selectionStart = t.selectionEnd = s + 1;
+  });
+
+  $('vgo').addEventListener('click', async () => {
+    hideVMsg();
+    const key = getKey();
+    if (!key) { showVErr('请先填写 X-API-Key'); return; }
+    if (!apicked) { showVErr('请先选择训练音频'); return; }
+    const name = $('vname').value.trim();
+    if (!/^[A-Za-z0-9_]{1,32}$/.test(name)) {
+      showVErr('音色名只能包含字母、数字、下划线，长度 1～32'); return;
+    }
+
+    const fd = new FormData();
+    fd.append('audio', apicked);
+    fd.append('voice_id', name);
+    fd.append('auto_train', $('vauto').checked ? 'true' : 'false');
+    const ep = $('vepoch').value.trim();
+    if (/^\d+$/.test(ep)) { fd.append('epochs_s1', ep); fd.append('epochs_s2', ep); }
+
+    const btn = $('vgo');
+    btn.disabled = true; btn.textContent = '上传中…';
+    $('vreview').style.display = 'none';
+    $('vprog').style.display = 'block';
+    setVProgress(0, '已提交，排队中…');
+    startVTimer();
+
+    try {
+      const r = await fetch('/api/v1/voices', {
+        method: 'POST', headers: { 'X-API-Key': key }, body: fd,
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(fmtErr(r.status, j));
+      curVoice = j.voice_id;
+      showVMsg(`已创建音色「${j.voice_id}」，正在切片与识别…`, 'ok');
+      pollVoice(curVoice, btn);
+    } catch (e) {
+      failTrain(e.message, btn);
+    }
+  });
+
+  function startVTimer() {
+    const t0 = Date.now();
+    if (vTimer) clearInterval(vTimer);
+    vTimer = setInterval(() => {
+      $('velapsed').textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    }, 100);
+  }
+
+  const VSTAGE = {
+    asr: '切片与语音识别', training: '训练中（耗时较长，请耐心等待）',
+    reviewing: '等待校对', done: '完成', failed: '失败',
+  };
+
+  function pollVoice(id, btn) {
+    if (vPolling) clearInterval(vPolling);
+    vPolling = setInterval(() => tick(id, btn), 2500);
+    tick(id, btn);
+  }
+
+  async function tick(id, btn) {
+    const key = getKey();
+    try {
+      const r = await fetch(`/api/v1/voices/${id}`, { headers: { 'X-API-Key': key } });
+      const j = await r.json();
+      if (!r.ok) throw new Error(fmtErr(r.status, j));
+
+      setVProgress(j.progress || 0, `${j.stage || ''} · ${VSTAGE[j.status] || j.status}`);
+      $('vstage').textContent = `${j.stage || VSTAGE[j.status] || j.status}`;
+
+      if (j.status === 'reviewing') {
+        clearInterval(vPolling); clearInterval(vTimer);
+        setVProgress(j.progress, '等待校对');
+        showVMsg(`识别完成（${j.segments} 段）。请在下方核对文本后开始训练。`, 'warn');
+        await loadTranscript(id);
+        btn.disabled = false; btn.textContent = '开始训练';
+        return;
+      }
+      if (j.status === 'done') {
+        clearInterval(vPolling); clearInterval(vTimer);
+        setVProgress(1, '完成');
+        showVMsg(`训练完成！音色「${id}」已可用 —— 在上方「音色」框填入 ` +
+                 `finetuned:${id}|<参考音频路径>|<参考文本>|中文 即可使用。`, 'ok');
+        $('vreview').style.display = 'none';
+        loadVoices();
+        btn.disabled = false; btn.textContent = '开始训练';
+        return;
+      }
+      if (j.status === 'failed') {
+        clearInterval(vPolling); clearInterval(vTimer);
+        showVErr(`训练失败：${j.error || '未知原因'}`);
+        btn.disabled = false; btn.textContent = '开始训练';
+        return;
+      }
+    } catch (e) {
+      clearInterval(vPolling); clearInterval(vTimer);
+      failTrain(e.message, btn);
+    }
+  }
+
+  function failTrain(m, btn) {
+    showVErr(m);
+    $('vprog').style.display = 'none';
+    btn.disabled = false; btn.textContent = '开始训练';
+  }
+
+  function setVProgress(p, stage) {
+    $('vbar').style.width = Math.round((p || 0) * 100) + '%';
+    $('vstage').textContent = stage;
+  }
+
+  async function loadTranscript(id) {
+    const r = await fetch(`/api/v1/voices/${id}/transcript`, { headers: { 'X-API-Key': getKey() } });
+    const j = await r.json();
+    if (!r.ok) { showVErr(fmtErr(r.status, j)); return; }
+    $('vtext').value = j.transcript;
+    $('vreview').style.display = 'block';
+    $('vreview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  $('vreload').addEventListener('click', () => curVoice && loadTranscript(curVoice));
+
+  $('vtrain').addEventListener('click', async () => {
+    if (!curVoice) { showVErr('没有进行中的训练'); return; }
+    const body = JSON.stringify({ transcript: $('vtext').value });
+    const btn = $('vtrain');
+    btn.disabled = true; btn.textContent = '提交中…';
+    try {
+      const r = await fetch(`/api/v1/voices/${curVoice}/train`, {
+        method: 'POST',
+        headers: { 'X-API-Key': getKey(), 'Content-Type': 'application/json' },
+        body,
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(fmtErr(r.status, j));
+      showVMsg('已提交，训练已开始。训练期间仍可正常生成口播视频。', 'ok');
+      $('vprog').style.display = 'block';
+      startVTimer();
+      pollVoice(curVoice, $('vgo'));
+    } catch (e) {
+      showVErr(e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '提交校对并开始训练';
+    }
+  });
+
+  // ================= 我的音色 =================
+  async function loadVoices() {
+    const key = getKey();
+    const ul = $('vlist'), empty = $('vlistEmpty');
+    if (!key) { empty.textContent = '填好密钥后点「刷新列表」。'; empty.style.display = 'block'; return; }
+    try {
+      const r = await fetch('/api/v1/voices', { headers: { 'X-API-Key': key } });
+      const j = await r.json();
+      if (!r.ok) { empty.textContent = fmtErr(r.status, j); empty.style.display = 'block'; return; }
+      ul.innerHTML = '';
+      const done = j.filter(v => v.status === 'done' && v.model_ready);
+      empty.style.display = done.length ? 'none' : 'block';
+      empty.textContent = j.length && !done.length
+        ? '有音色但都还没训练完成。'
+        : '还没有训练过音色。用上面的「训练专属音色」创建一个。';
+      done.forEach(v => {
+        const li = document.createElement('li');
+        const nm = document.createElement('span');
+        nm.className = 'nm'; nm.textContent = v.voice_id;
+        const sp = document.createElement('span');
+        sp.className = 'sp';
+        sp.textContent = `finetuned:${v.voice_id}|…`;
+        const use = document.createElement('button');
+        use.className = 'ghost sm'; use.textContent = '用这个音色';
+        use.onclick = () => {
+          $('voice').value = `finetuned:${v.voice_id}|<参考音频的服务器路径>|<参考文本>|中文`;
+          $('voiceHint').innerHTML =
+            '已填入模板 —— <b>把 &lt;参考音频的服务器路径&gt; 和 &lt;参考文本&gt; 换成真实值</b>' +
+            '（参考音频需 3～10 秒、在服务器上、且 API 不支持上传音频，只能给路径）。';
+          $('voice').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        };
+        li.append(nm, sp, use);
+        ul.appendChild(li);
+      });
+    } catch (e) {
+      empty.textContent = '拉取音色列表失败：' + e.message;
+      empty.style.display = 'block';
+    }
+  }
+  $('vrefresh').addEventListener('click', loadVoices);
+  keyEl.addEventListener('change', loadVoices);
+  if (keyEl.value.trim()) loadVoices();
+  setTimeout(() => { if (keyEl.value.trim()) loadVoices(); }, 600);
 })();
 </script>
 </body>

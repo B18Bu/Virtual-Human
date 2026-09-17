@@ -4,11 +4,21 @@
 *.token
 .github_token
 .env
+# LLM Key。live-commerce/ 自己也有一份同样的规则，这里是纵深防御：
+# 曾出过「修坏时的备份 llm_config.json.broken 同样含密钥却漏网」的事故，
+# 故用通配把 .broken / .bak 一类备份一并挡住。
+llm_config.json
+llm_config.json.*
+!llm_config.example.json
 
 # ---- 运行时产物 ----
 outputs/
 uploads/
 logs/
+build/
+voice_work/
+script.json
+script.built.json
 *.mp4
 *.wav
 *.mp3

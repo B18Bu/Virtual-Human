@@ -35,13 +35,22 @@ def _normalise_suffix(suffix: str) -> str:
     return suffix
 
 
-def save_bytes(data: bytes, suffix: str, task_id: str, *, kind: str = "upload") -> Path:
-    """把二进制内容写入 uploads 目录，返回落盘路径。"""
+def save_bytes(data: bytes, suffix: str, task_id: str, *, kind: str = "upload",
+               allowed: set[str] | None = None,
+               max_bytes: int | None = None,
+               label: str = "图片") -> Path:
+    """把二进制内容写入 uploads 目录，返回落盘路径。
+
+    白名单与体积上限默认按**图片**（保持既有调用方行为不变）；
+    音色训练上传的是音频，调用方显式传 allowed/max_bytes/label 覆盖。
+    """
     suffix = _normalise_suffix(suffix)
-    if suffix not in config.ALLOWED_IMAGE_SUFFIX:
-        raise ValueError(f"不支持的图片格式 {suffix}，允许：{sorted(config.ALLOWED_IMAGE_SUFFIX)}")
-    if len(data) > config.MAX_IMAGE_BYTES:
-        raise ValueError(f"图片超过大小上限 {config.MAX_IMAGE_BYTES // 1024 // 1024}MB")
+    allowed = allowed if allowed is not None else config.ALLOWED_IMAGE_SUFFIX
+    max_bytes = max_bytes if max_bytes is not None else config.MAX_IMAGE_BYTES
+    if suffix not in allowed:
+        raise ValueError(f"不支持的{label}格式 {suffix}，允许：{sorted(allowed)}")
+    if len(data) > max_bytes:
+        raise ValueError(f"{label}超过大小上限 {max_bytes // 1024 // 1024}MB")
 
     config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = config.UPLOAD_DIR / f"{kind}-{task_id}-{int(time.time() * 1000)}{suffix}"

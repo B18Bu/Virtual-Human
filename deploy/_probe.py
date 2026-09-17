@@ -11,16 +11,25 @@ import subprocess
 import sys
 from pathlib import Path
 
-# 中心区域（画面正中 50% x 50%）相邻帧平均灰度差的下限，低于它即认为「画面没动」。
-# 只看中心：人像在 640x1024 的画面里只占中间一小块，全幅均值会把口型与微表情
-# 的变化稀释掉。
+# 「画面在动」的判据：把画面切成 MOTION_GRID x MOTION_GRID 块，取**全片变化最大的
+# 那一块**的相邻帧平均灰度差，低于 MOTION_EPS 即认为画面没动。
 #
-# 阈值来自实测（2026-09-14）而不是估计：
-#   · 静帧基线 0.01——把产物首帧用同样参数（h264 / 20fps / 同分辨率同时长）编成
-#     静帧视频再测，libx264 对完全相同的输入帧几乎输出相同的帧；
-#   · 真实产出 1.31 与 2.56（两次不同文本/不同韵律的生成）。
-# 取 0.5：高于静帧基线 50 倍，又低于实测最低的真视频 2.6 倍，两头都有余量。
-MOTION_EPS = 0.5
+# **为什么用分块而不是原来的「中心 50%x50%」**（2026-09-14 修正）：
+# 中心区判据实质上在测「全画面抖动」，对**只重绘嘴部**的引擎（MuseTalk / Wav2Lip）
+# 天生不利——嘴在 640x1024 里只是一小块，区域均值把它按面积稀释掉了。实测同一个
+# 真在动的 MuseTalk 产物，中心区判据只有 0.27，而它嘴部的真实运动是 2.7。分块等于
+# 把「面积」这个无关变量归一化掉，测的是「有没有任何一处真的在动」。
+#
+# 阈值来自实测（2026-09-14，静止背景为同一张 640x1024 人像）而不是估计：
+#   · 静帧基线 0.056——首帧用同样参数编成同时长静帧视频，libx264 对相同输入几乎输出相同帧；
+#   · 静音期的 MuseTalk 产物 0.513——**嘴闭着不动但画面本身合法**，必须判否（见交接文档 5.9）；
+#   · 真实产出：MuseTalk 2.71 / Wav2Lip 5.77 / SadTalker 10.72。
+# 取 1.0：高于静帧基线 18 倍、高于「静音期静嘴」2 倍，又低于实测最低的真产出 2.7 倍。
+MOTION_EPS = 1.0
+
+# 分块网格边长（8 → 64 块，640x1024 时每块 80x128 px）。口型只影响脸部一小块，
+# 网格太粗会把嘴淹回去，太细则块内像素太少、均值噪声变大。
+MOTION_GRID = 8
 
 # 音轨 RMS 下限（int16 满量程 32767）。**静音音轨的 RMS 是 0.0**，正常中文语音
 # 大约在 1000~5000，所以这个阈值只是用来拦「完全没声音」，不做音质判断。
@@ -70,7 +79,11 @@ def probe(path: Path) -> dict:
 
 
 def motion_report(path: Path) -> tuple[float, float, int]:
-    """返回（中心区域相邻帧最大平均灰度差, 首末帧中心区域差, 帧数）。只解码不看音频。"""
+    """返回（最大分块相邻帧平均灰度差, 首末帧同一分块差, 帧数）。只解码不看音频。
+
+    第一个返回值是「全片任何一块里出现过的最大帧间变化」，就是「画面在动」的依据；
+    第二个是首末帧在**同一块**上的差，用来说明动作是否贯穿全片（只做参考不做判据）。
+    """
     import cv2
     import numpy as np
 
@@ -86,9 +99,25 @@ def motion_report(path: Path) -> tuple[float, float, int]:
         return 0.0, 0.0, len(frames)
 
     h, w = frames[0].shape[:2]
-    box = (slice(h // 4, 3 * h // 4), slice(w // 4, 3 * w // 4))
-    diffs = [float(np.abs(a[box] - b[box]).mean()) for a, b in zip(frames, frames[1:])]
-    return max(diffs), float(np.abs(frames[0][box] - frames[-1][box]).mean()), len(frames)
+    # 用取整切分而不是 h//grid，保证最后一行/列不留缝隙（不整除时也不丢像素）
+    ys = [round(k * h / MOTION_GRID) for k in range(MOTION_GRID + 1)]
+    xs = [round(k * w / MOTION_GRID) for k in range(MOTION_GRID + 1)]
+
+    best, best_box = 0.0, None
+    for i in range(MOTION_GRID):
+        for j in range(MOTION_GRID):
+            box = (slice(ys[i], ys[i + 1]), slice(xs[j], xs[j + 1]))
+            if ys[i] == ys[i + 1] or xs[j] == xs[j + 1]:
+                continue  # 画面小于网格时会出现空块（验收产物边长 ≥256，正常不会走到）
+            diffs = [float(np.abs(a[box] - b[box]).mean()) for a, b in zip(frames, frames[1:])]
+            m = max(diffs)
+            if m > best:
+                best, best_box = m, box
+
+    head_tail = 0.0
+    if best_box is not None:
+        head_tail = float(np.abs(frames[0][best_box] - frames[-1][best_box]).mean())
+    return best, head_tail, len(frames)
 
 
 def video_checks(path: Path, *, min_bytes: int, min_side: int = 256) -> tuple[dict, str]:
@@ -125,6 +154,9 @@ def video_checks(path: Path, *, min_bytes: int, min_side: int = 256) -> tuple[di
             width >= min_side and height >= min_side and nb_frames > 1,
             f"{width}x{height}, {nb_frames} 帧, {duration:.2f}s",
         ),
-        "画面在动": (motion > MOTION_EPS, f"中心区域最大差 {motion:.2f}（首末帧 {head_tail:.2f}）> {MOTION_EPS}"),
+        "画面在动": (
+            motion > MOTION_EPS,
+            f"最大分块帧间差 {motion:.2f}（首末帧同块 {head_tail:.2f}）> {MOTION_EPS}",
+        ),
     }
     return checks, summary

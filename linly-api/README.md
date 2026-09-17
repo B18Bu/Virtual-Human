@@ -15,7 +15,7 @@ Linly-Talker 的 Gradio WebUI 默认也监听 6006（`configs.py` 中 `port = 60
 公网入口（AutoDL 控制台「自定义服务」也可查看）：
 
 ```
-https://<你的实例地址>
+<你的实例地址>
 ```
 
 该地址就是 `AutoDLService6006URL` 环境变量的值，服务会自动读取它拼装 `result_url`。
@@ -45,7 +45,7 @@ nohup /root/autodl-tmp/linly-api/run.sh > /root/autodl-tmp/logs/api.log 2>&1 &
 打开即可用，不需要装任何东西：
 
 ```
-https://<你的实例地址>/ui
+<你的实例地址>/ui
 ```
 
 页面流程：填密钥 → 选图片 → 输入文本 → 开始生成 → 看进度条 → 视频在线播放 / 下载。
@@ -98,7 +98,7 @@ GPU 只有一张，模型常驻显存，因此 **worker 固定为 1，所有任�
 ## 调用示例
 
 ```bash
-BASE=https://<你的实例地址>
+BASE=<你的实例地址>
 KEY=$(cat /root/autodl-tmp/linly-api/.api_key)
 
 # 1) 提交（multipart，最省事）
@@ -163,7 +163,7 @@ curl -sO "$BASE/api/v1/files/a1b2c3....mp4"
 | HTTP 层 / 队列 / 鉴权 / 文件下发 | ✅ 已实现 |
 | `adapter.py` 中的 `RealPipeline` | ✅ 已实现并验收通过（`pipeline_impl: linly-talker`） |
 | TTS | ✅ Edge-TTS（默认，无需本地权重）/ CosyVoice SFT / GPT-SoVITS 克隆 |
-| 口型驱动 | ✅ SadTalker（默认，图片原生）/ Wav2Lip（最省显存，18s 出片）/ MuseTalk（⚠️ 产出无口型动作） |
+| 口型驱动 | ✅ SadTalker（默认，图片原生）/ Wav2Lip（最省显存，18s 出片）/ MuseTalk（只重绘嘴部；曾被误判「无口型动作」，已澄清） |
 
 `/api/v1/health` 返回的 `pipeline_impl` 是判断真假的依据：`linly-talker` 表示模型链路
 已接通；`mock` 表示跑的是占位实现，**产物是文本文件不是视频**。

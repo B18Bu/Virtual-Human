@@ -23,8 +23,14 @@ from .schemas import (
     TaskCreateJSON,
     TaskCreateResponse,
     TaskInfo,
+    TranscriptBody,
+    TranscriptResponse,
+    VoiceCreateResponse,
+    VoiceInfo,
+    VoiceStatus,
 )
 from .security import load_or_create_api_key, require_api_key
+from .voices import VoiceManager, VoiceRecord
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +94,11 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = pipeline
     app.state.queue = queue
 
+    # 音色训练：独立于推理队列（训练几十分钟起步，塞进单 worker 队列会把口播请求全堵死）
+    voices = VoiceManager()
+    await voices.startup()
+    app.state.voices = voices
+
     async def _purge_loop() -> None:
         while True:
             await asyncio.sleep(PURGE_INTERVAL_SECONDS)
@@ -108,6 +119,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         purge_task.cancel()
+        await voices.shutdown()
         await queue.stop()
 
 
@@ -151,6 +163,8 @@ async def root() -> JSONResponse:
             "submit": "POST /api/v1/tasks （JSON，需 X-API-Key）",
             "submit_upload": "POST /api/v1/tasks/upload （multipart，需 X-API-Key）",
             "poll": "GET /api/v1/tasks/{task_id}",
+            "voice_train": "POST /api/v1/voices （上传音频训练专属音色，需 X-API-Key）",
+            "voice_list": "GET /api/v1/voices",
         }
     )
 
@@ -236,7 +250,7 @@ def _suffix_of(upload: UploadFile) -> str:
     return "." + name.rsplit(".", 1)[-1]
 
 
-async def _read_capped(upload: UploadFile, limit: int) -> bytes:
+async def _read_capped(upload: UploadFile, limit: int, label: str = "图片") -> bytes:
     """分块读取并设上限。直接 await upload.read() 会把整个请求体灌进内存，公网接口上不能这么干。"""
     chunks: list[bytes] = []
     total = 0
@@ -248,7 +262,7 @@ async def _read_capped(upload: UploadFile, limit: int) -> bytes:
         if total > limit:
             raise HTTPException(
                 status_code=413,
-                detail=f"图片超过 {limit // 1024 // 1024}MB 上限",
+                detail=f"{label}超过 {limit // 1024 // 1024}MB 上限",
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -364,3 +378,170 @@ async def download_result(request: Request, filename: str) -> FileResponse:
         filename=filename,
         headers={"Cache-Control": "no-store"},
     )
+
+
+# --------------------------------------------------------------------- 音色训练
+# 完整流程：
+#   POST   /api/v1/voices                  上传音频 → 自动切片+识别 → 停在等校对
+#   GET    /api/v1/voices/{id}/transcript  取识别文本
+#   PUT    /api/v1/voices/{id}/transcript  提交人工校对后的文本
+#   POST   /api/v1/voices/{id}/train       开始训练
+#   GET    /api/v1/voices/{id}             查进度
+#   GET    /api/v1/voices                  列出所有音色
+#   DELETE /api/v1/voices/{id}             删除音色及其全部中间产物
+#
+# 上传时可传 auto_train=true 跳过校对直接训练（省事，但 ASR 错字无人纠正）。
+
+
+def _voice_or_404(manager: VoiceManager, voice_id: str) -> VoiceRecord:
+    rec = manager.get(voice_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"音色 {voice_id} 不存在")
+    return rec
+
+
+@app.post(
+    "/api/v1/voices",
+    response_model=VoiceCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_api_key)],
+)
+async def create_voice(
+    request: Request,
+    audio: UploadFile = File(..., description="训练音频：1~30 分钟干净人声，wav/mp3/m4a 等"),
+    voice_id: str = Form(..., description="音色名，只允许字母/数字/下划线，最长 32"),
+    auto_train: bool = Form(False, description="true 则跳过人工校对直接训练"),
+    epochs_s1: int = Form(config.TRAIN_EPOCHS_S1, ge=1, le=50),
+    epochs_s2: int = Form(config.TRAIN_EPOCHS_S2, ge=1, le=100),
+) -> VoiceCreateResponse:
+    """上传一段音频，开始训练一个专属音色。
+
+    默认**不**直接训练：先自动切片 + 语音识别，产出一份标注草稿停下，
+    等校对确认（见 `GET/PUT .../transcript`）后再调 `POST .../train`。
+    这样能避免 ASR 错字被训练进模型 —— 实测中「待办」被识别成「代办」就是典型例子。
+    """
+    manager: VoiceManager = request.app.state.voices
+
+    suffix = _suffix_of_audio(audio)
+    data = await _read_capped(audio, config.MAX_AUDIO_BYTES, label="音频")
+    if not data:
+        raise HTTPException(status_code=400, detail="音频内容为空")
+
+    # 先把音频落盘再建任务，避免建立了一个后续必然失败的空任务
+    try:
+        audio_path = storage.save_bytes(
+            data, suffix, voice_id, kind="voice",
+            allowed=config.ALLOWED_AUDIO_SUFFIX,
+            max_bytes=config.MAX_AUDIO_BYTES, label="音频")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    try:
+        rec = await manager.create(
+            voice_id, audio_path, source_name=audio.filename or audio_path.name,
+            auto_train=auto_train, epochs_s1=epochs_s1, epochs_s2=epochs_s2)
+    except ValueError as exc:
+        storage.delete_quietly(audio_path)
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    base = config.PUBLIC_URL
+    return VoiceCreateResponse(
+        voice_id=rec.voice_id,
+        status=rec.status,
+        poll_url=f"{base}/api/v1/voices/{rec.voice_id}",
+        transcript_url=f"{base}/api/v1/voices/{rec.voice_id}/transcript",
+        message=("已开始全自动训练（未校对标注）。"
+                 if auto_train else
+                 "已完成切片与识别，请取 transcript 校对后调 /train 开始训练。"),
+    )
+
+
+def _suffix_of_audio(upload: UploadFile) -> str:
+    name = (upload.filename or "").lower()
+    if "." not in name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"音频文件名缺少扩展名，无法判断格式；允许 {sorted(config.ALLOWED_AUDIO_SUFFIX)}",
+        )
+    return "." + name.rsplit(".", 1)[-1]
+
+
+@app.get("/api/v1/voices", response_model=list[VoiceInfo],
+         dependencies=[Depends(require_api_key)])
+async def list_voices(request: Request) -> list[VoiceInfo]:
+    """列出所有音色（含已完成的历史音色）。"""
+    manager: VoiceManager = request.app.state.voices
+    return [VoiceInfo(**r.to_info()) for r in manager.list()]
+
+
+@app.get("/api/v1/voices/{voice_id}", response_model=VoiceInfo,
+         dependencies=[Depends(require_api_key)])
+async def get_voice(request: Request, voice_id: str) -> VoiceInfo:
+    """查询训练进度。`status=done` 且 `model_ready=true` 时即可使用。"""
+    manager: VoiceManager = request.app.state.voices
+    return VoiceInfo(**_voice_or_404(manager, voice_id).to_info())
+
+
+@app.get("/api/v1/voices/{voice_id}/transcript", response_model=TranscriptResponse,
+         dependencies=[Depends(require_api_key)])
+async def get_transcript(request: Request, voice_id: str) -> TranscriptResponse:
+    """取 ASR 标注全文，供人工校对。
+
+    每行 `文件名<TAB>文本`。改右侧文本即可，**不要**动左侧文件名、
+    不要增删行、不要把 TAB 换成空格。
+    """
+    manager: VoiceManager = request.app.state.voices
+    rec = _voice_or_404(manager, voice_id)
+    try:
+        text = manager.read_transcript(rec)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return TranscriptResponse(voice_id=voice_id, segments=rec.segments, transcript=text)
+
+
+@app.put("/api/v1/voices/{voice_id}/transcript",
+         dependencies=[Depends(require_api_key)])
+async def put_transcript(request: Request, voice_id: str,
+                         body: TranscriptBody) -> dict:
+    """提交校对后的标注。之后调 `POST .../train` 开始训练。"""
+    manager: VoiceManager = request.app.state.voices
+    rec = _voice_or_404(manager, voice_id)
+    if rec.status in (VoiceStatus.TRAINING, VoiceStatus.ASR):
+        raise HTTPException(status_code=409,
+                            detail=f"当前状态 {rec.status.value} 不接受校对提交")
+    try:
+        n = manager.write_transcript(rec, body.transcript)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"voice_id": voice_id, "saved_lines": n,
+            "next": f"POST {config.PUBLIC_URL}/api/v1/voices/{voice_id}/train"}
+
+
+@app.post("/api/v1/voices/{voice_id}/train", status_code=status.HTTP_202_ACCEPTED,
+          dependencies=[Depends(require_api_key)])
+async def train_voice(request: Request, voice_id: str,
+                      body: TranscriptBody | None = None) -> dict:
+    """开始训练。
+
+    可以直接提交校对稿（body 里带 transcript），也可以先 PUT 校对稿再空跑本接口。
+    训练是**长任务**（几十分钟量级），立即返回 202，之后轮询 `GET /api/v1/voices/{id}`。
+    """
+    manager: VoiceManager = request.app.state.voices
+    rec = _voice_or_404(manager, voice_id)
+    try:
+        await manager.start_training(rec, body.transcript if body else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"voice_id": voice_id, "status": rec.status.value,
+            "poll_url": f"{config.PUBLIC_URL}/api/v1/voices/{voice_id}",
+            "note": "训练为长任务，请轮询；完成后 voice 参数用 "
+                    f"finetuned:{voice_id}|<参考音频>|<参考文本>|中文"}
+
+
+@app.delete("/api/v1/voices/{voice_id}", dependencies=[Depends(require_api_key)])
+async def delete_voice(request: Request, voice_id: str) -> dict:
+    """删除音色：连同中间产物与训练好的模型一并删除，不可恢复。"""
+    manager: VoiceManager = request.app.state.voices
+    rec = _voice_or_404(manager, voice_id)
+    manager.delete(rec)
+    return {"voice_id": voice_id, "deleted": True}

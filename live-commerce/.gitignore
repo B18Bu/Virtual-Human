@@ -1,0 +1,12 @@
+# 含密钥，绝不入库（.broken 是修坏文件时的备份，同样含密钥）
+llm_config.json
+llm_config.json.*
+!llm_config.example.json
+
+# 渲染产物
+build/
+script.json
+script.built.json
+
+__pycache__/
+*.pyc

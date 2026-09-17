@@ -44,6 +44,32 @@ MAX_REQUEST_BYTES = int(os.getenv("LINLY_MAX_REQUEST_BYTES", str(MAX_IMAGE_BYTES
 ALLOWED_IMAGE_SUFFIX = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 ALLOWED_RESULT_SUFFIX = {".mp4", ".wav", ".png", ".jpg", ".jpeg"}
 
+# ---------------------------------------------------------------- 音色训练
+# 训练用的音频素材。训练要的是「1~30 分钟干净人声」，比图片大得多，
+# 所以单独一套后缀白名单与体积上限（默认 100MB，够放 10 分钟无损 wav）。
+ALLOWED_AUDIO_SUFFIX = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
+MAX_AUDIO_BYTES = int(os.getenv("LINLY_MAX_AUDIO_BYTES", str(100 * 1024 * 1024)))
+
+# 训练流水线所在（**项目仓库之外**，理由见该目录 pipeline.py 的文件头注释）
+TRAIN_SCRIPT = os.getenv("LINLY_TRAIN_SCRIPT", "/root/autodl-tmp/voice-train/pipeline.py")
+TRAIN_PYTHON = os.getenv("LINLY_TRAIN_PYTHON",
+                         "/root/autodl-tmp/conda/envs/linly/bin/python")
+# 训练中间产物（切片/特征/ckpt）体积可观，放数据盘
+TRAIN_WORK_DIR = Path(os.getenv("LINLY_TRAIN_WORK_DIR", str(BASE_DIR / "voice_work")))
+# 训练好的音色最终落在这里，供 adapter 加载。
+# ⚠️ 这个路径**不能含 "pretrained" 子串**：VITS/GPT_SoVITS.py:351 用
+#    `if ("pretrained" not in sovits_path): del vq_model.enc_q` 做**路径子串匹配**，
+#    微调产物本就不含 enc_q，路径里带上它会让判断走错分支。
+VOICES_DIR = Path(os.getenv("LINLY_VOICES_DIR", "/root/autodl-tmp/voices"))
+
+# 训练任务记录保留时长。训练产物是**目录**且比一次口播宝贵，默认留 7 天。
+TRAIN_TTL_SECONDS = int(os.getenv("LINLY_TRAIN_TTL", str(7 * 24 * 3600)))
+# 同时只允许一个训练（单卡，且训练与推理互斥）
+TRAIN_MAX_CONCURRENCY = int(os.getenv("LINLY_TRAIN_MAX_CONCURRENCY", "1"))
+# 默认训练轮数
+TRAIN_EPOCHS_S1 = int(os.getenv("LINLY_TRAIN_EPOCHS_S1", "8"))
+TRAIN_EPOCHS_S2 = int(os.getenv("LINLY_TRAIN_EPOCHS_S2", "8"))
+
 # ---------------------------------------------------------------- 模型
 # auto: 按显存自动选择；其余为强制指定
 DEFAULT_MODE = os.getenv("LINLY_DEFAULT_MODE", "auto")
@@ -57,5 +83,6 @@ VRAM_MID = 6.0      # 6~10G 跳过 MuseTalk；< 6G 仅 Wav2Lip + EdgeTTS
 
 def ensure_dirs() -> None:
     """确保所有可写目录存在。"""
-    for d in (BASE_DIR, OUTPUT_DIR, UPLOAD_DIR, LOG_DIR):
+    for d in (BASE_DIR, OUTPUT_DIR, UPLOAD_DIR, LOG_DIR,
+              TRAIN_WORK_DIR, VOICES_DIR):
         d.mkdir(parents=True, exist_ok=True)
