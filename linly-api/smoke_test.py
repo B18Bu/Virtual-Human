@@ -125,7 +125,10 @@ def main() -> int:
             json={"text": "x", "image_base64": base64.b64encode(TINY_PNG).decode(), "mode": "bogus"},
             headers=headers,
         )
-        check("非法 mode 返回 400", r.status_code == 400, f"({r.status_code})")
+        # JSON 路径的 mode 是 `Literal` 类型，非法值由 Pydantic 在进路由前拦下 → 422。
+        # （multipart 路径 /tasks/upload 的 mode 是裸 str，走 _validate_mode → 400。
+        #  两条路返回码不一致，是既有行为，见 linly-api/README.md「已知不一致」。）
+        check("非法 mode 被拒（JSON 路径 422）", r.status_code == 422, f"({r.status_code})")
         r = client.post(
             f"{BASE}/api/v1/tasks",
             json={"text": "   ", "image_base64": base64.b64encode(TINY_PNG).decode()},

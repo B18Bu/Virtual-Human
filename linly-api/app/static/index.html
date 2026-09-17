@@ -358,14 +358,20 @@
     btn.disabled = false; btn.textContent = '开始生成';
   }
 
+  // 最近一次成功任务的 id + 下载重入哨兵，供「点下载时重取签名」用
+  let lastResultTask = null, dlRefreshing = false;
+
   function finish(j, t0, btn) {
     setProgress(1, '完成');
     // result_url 是公网绝对地址；页面可能从内网/公网任意一侧打开，
     // 只取路径走同源，避免把页面自己的 origin 写死。
+    // ⚠️ 必须**连查询串一起取**（?e=…&s=…）——下载签名就在查询串里，
+    // 只取 .pathname 会把它丢掉，播放与下载一律 404。
     let path;
-    try { path = new URL(j.result_url, location.origin).pathname; }
+    try { const u = new URL(j.result_url, location.origin); path = u.pathname + u.search; }
     catch (e) { path = j.result_url; }
 
+    lastResultTask = j.task_id || null;
     const v = $('video');
     v.src = path;
     $('dl').href = path;
@@ -380,6 +386,26 @@
       : `生成成功，但只有 ${kb.toFixed(0)} KB —— 偏小，检查是否误用了 crop 预处理`);
     btn.disabled = false; btn.textContent = '开始生成';
   }
+
+  // 签名 URL 有有效期。页面可能开着很久（生成完去吃饭，回来再点下载），
+  // 若一直用 finish() 当时写下的 href 就会 404。点击时重新拉一次任务换新签名。
+  $('dl').addEventListener('click', async (ev) => {
+    if (dlRefreshing || !lastResultTask) return;   // 第二次进来直接放行，走原生下载
+    ev.preventDefault();
+    dlRefreshing = true;
+    try {
+      const r = await fetch(`/api/v1/tasks/${lastResultTask}`, { headers: { 'X-API-Key': getKey() } });
+      if (r.ok) {
+        const j = await r.json();
+        if (j.result_url) {
+          const u = new URL(j.result_url, location.origin);
+          $('dl').href = u.pathname + u.search;
+        }
+      }
+    } catch (e) { /* 拉不到就沿用原 href，让它自己去报错 */ }
+    $('dl').click();
+    dlRefreshing = false;
+  });
 
   function setProgress(p, stage) {
     $('bar').style.width = Math.round((p || 0) * 100) + '%';

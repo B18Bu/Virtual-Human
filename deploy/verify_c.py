@@ -102,9 +102,11 @@ if info.get("status") != "succeeded":
 
 # ---------------------------------------------------------------- 4. 取产物
 # result_url 是公网入口（AutoDLService6006URL），容器内解析不到那个域名，
-# 所以只取 path，仍走本机回环——对外的可用性由「公网入口」一节单独说明。
+# 所以只取 path 走本机回环——对外的可用性由「公网入口」一节单独说明。
+# ⚠️ **查询串必须保留**：产物下载要签名（?e=…&s=…），只取 .path 会 404。
 url = info["result_url"]
-path = urllib.parse.urlparse(url).path or url
+_u = urllib.parse.urlparse(url)
+path = (_u.path + (f"?{_u.query}" if _u.query else "")) or url
 status, blob = call("GET", path, key=key)
 OUT.parent.mkdir(parents=True, exist_ok=True)
 OUT.write_bytes(blob)

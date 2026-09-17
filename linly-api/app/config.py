@@ -24,9 +24,21 @@ PORT = int(os.getenv("LINLY_PORT", "6006"))
 # 对外暴露的服务地址（AutoDL 控制台「自定义服务」入口）
 PUBLIC_URL = os.getenv("AutoDLService6006URL", "")
 
+# 跨域白名单，逗号分隔。**默认为空 = 不挂 CORS 中间件**（只有同源可用，与挂载前一致）。
+# 浏览器前端与 API 不同源时才需要填，例如 LINLY_CORS_ORIGINS=https://shop.example.com
+# ⚠️ 不要填 "*"：本服务的鉴权是自定义头 X-API-Key，通配等于允许任意站点携带它发起请求。
+CORS_ORIGINS = [o.strip() for o in os.getenv("LINLY_CORS_ORIGINS", "").split(",") if o.strip()]
+
+# 接口文档（/docs /redoc）。**默认关闭**：AutoDL 映射的公网地址没有任何前置鉴权，
+# 开着等于把完整接口结构挂在公网上。本地调试时 LINLY_ENABLE_DOCS=1 临时打开。
+ENABLE_DOCS = os.getenv("LINLY_ENABLE_DOCS", "0") == "1"
+
 # ---------------------------------------------------------------- 鉴权
 API_KEY_ENV = os.getenv("LINLY_API_KEY", "")
 API_KEY_FILE = BASE_DIR / ".api_key"
+# 产物下载签名的 HMAC 密钥。**这个文件绝不能进仓库**——泄露等于签名机制失效。
+URL_SECRET_ENV = os.getenv("LINLY_URL_SECRET", "")
+URL_SECRET_FILE = BASE_DIR / ".url_secret"
 
 # ---------------------------------------------------------------- 任务队列
 # 单卡只能串行跑 GPU 推理，worker 数固定为 1，多余请求排队。
@@ -34,6 +46,13 @@ MAX_WORKERS = int(os.getenv("LINLY_MAX_WORKERS", "1"))
 MAX_QUEUE_SIZE = int(os.getenv("LINLY_MAX_QUEUE_SIZE", "64"))
 # 任务记录在内存中的保留时长（秒），超时后自动清理
 TASK_TTL_SECONDS = int(os.getenv("LINLY_TASK_TTL", str(6 * 3600)))
+
+# 产物下载 URL 的签名有效期（秒）。它防的**不是**暴力破解（文件名本身是随机
+# task_id，还有归属校验兜底），而是**链接被分享出去 / 留在浏览器历史与日志里**之后的
+# 二次使用。默认 1 小时。
+# ⚠️ 必须**远大于**单个视频的观看时长：`<video>` 播放中 seek 会重发 Range 请求，
+# 若此刻签名恰好过期，播放会直接中断。别把它调到几百秒。
+URL_TTL_SECONDS = int(os.getenv("LINLY_URL_TTL", "3600"))
 
 # ---------------------------------------------------------------- 上传限制
 MAX_IMAGE_BYTES = int(os.getenv("LINLY_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))

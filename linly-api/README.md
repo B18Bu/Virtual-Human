@@ -60,7 +60,7 @@ nohup /root/autodl-tmp/linly-api/run.sh > /root/autodl-tmp/logs/api.log 2>&1 &
 
 ## 鉴权
 
-除 `/`、`/ui`、`/api/v1/health`、`/api/v1/files/{name}` 外，所有接口都需要请求头：
+除 `/`、`/ui`、`/api/v1/health` 外，所有接口都需要请求头：
 
 ```
 X-API-Key: <你的密钥>
@@ -68,6 +68,18 @@ X-API-Key: <你的密钥>
 
 密钥来源优先级：环境变量 `LINLY_API_KEY` > 文件 `/root/autodl-tmp/linly-api/.api_key`（首次启动自动生成，权限 0600）。
 启动日志里会打印一次，也可以用 `cat /root/autodl-tmp/linly-api/.api_key` 读取。
+
+**产物下载（`/api/v1/files/{filename}`）是唯一的例外**：它不用 `X-API-Key`，而是要求 URL 上带
+**短期签名** `?e=<过期时间>&s=<签名>`。
+
+为什么不能统一用请求头：`<video src>` 与 `<a href download>` 是浏览器发起的**裸导航**，
+**带不上自定义请求头**——用头部鉴权会把在线播放和下载按钮一起弄坏。
+
+**直接用轮询返回的 `result_url` 即可**，签名已经在里面了。**不要自己拼**
+`{BASE}/api/v1/files/{task_id}.mp4`——拼出来的没有签名，一律 404。
+
+签名有效期取 `LINLY_URL_TTL` 与「产物剩余寿命」的较小值。过了期就重新拉一次
+`GET /api/v1/tasks/{task_id}` 取新 URL（`/ui` 页面点下载时会自动这么做）。
 
 ## 接口
 
@@ -80,7 +92,7 @@ X-API-Key: <你的密钥>
 | GET | `/api/v1/tasks/{task_id}` | 轮询任务状态与进度 |
 | GET | `/api/v1/tasks` | 列出最近任务 |
 | DELETE | `/api/v1/tasks/{task_id}` | 取消任务 |
-| GET | `/api/v1/files/{filename}` | 下载产物 |
+| GET | `/api/v1/files/{filename}` | 下载产物。**需 URL 自带短期签名**（`?e=&s=`），不用 `X-API-Key`，见「鉴权」一节 |
 
 ### 为什么是异步任务制
 
@@ -114,8 +126,10 @@ curl -s "$BASE/api/v1/tasks/a1b2c3..." -H "X-API-Key: $KEY"
 # -> {"status":"running","progress":0.5,"stage":"语音合成(TTS)",...}
 #    完成后 result_url 给出下载地址
 
-# 3) 下载产物
-curl -sO "$BASE/api/v1/files/a1b2c3....mp4"
+# 3) 下载产物——**必须用第 2 步返回的 result_url 原样下载**（签名在里面）
+#    不要自己拼 /api/v1/files/<task_id>.mp4，那样没有签名，会 404
+curl -sO "$(curl -s "$BASE/api/v1/tasks/a1b2c3..." -H "X-API-Key: $KEY" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["result_url"])')"
 ```
 
 ## 配置项（环境变量）
@@ -129,6 +143,12 @@ curl -sO "$BASE/api/v1/files/a1b2c3....mp4"
 | `LINLY_MAX_IMAGE_BYTES` | `10485760` | 单张图片上限 10MB |
 | `LINLY_MAX_TEXT_CHARS` | `1000` | 单次文本长度上限 |
 | `LINLY_TASK_TTL` | `21600` | 任务记录与产物保留 6 小时 |
+| `LINLY_URL_TTL` | `3600` | 产物下载签名的有效期（秒）。**必须远大于单个视频的观看时长**——`<video>` 播放中 seek 会重发 Range 请求，此刻签名过期会导致播放中断 |
+| `LINLY_ENABLE_DOCS` | `0` | 设 1 打开 `/docs` `/redoc` `/openapi.json`。默认关闭，公网部署别开 |
+| `LINLY_CORS_ORIGINS` | 空 | 跨域白名单，逗号分隔。留空 = 不挂 CORS 中间件（仅同源）。**别用 `*`** |
+| `LINLY_URL_SECRET` | 空 | 签名密钥；留空则自动生成并落盘到 `.url_secret`（0600） |
+| `LINLY_TRAIN_TTL` | `604800` | 训练**中间产物**回收期限（秒），默认 7 天。已注册的音色模型不删 |
+| `LINLY_TRAIN_MAX_CONCURRENCY` | `1` | 同时进行的训练数上限。单卡上训练与推理互斥，不建议调大 |
 | `LINLY_PRELOAD` | `0` | 设 1 则启动时预加载模型（启动慢，但首个任务快） |
 | `LINLY_DEFAULT_MODE` | `auto` | 默认形象驱动方式 |
 | `LINLY_SADTALKER_PREPROCESS` | `full` | SadTalker 构图模式，见下 |
@@ -149,12 +169,26 @@ curl -sO "$BASE/api/v1/files/a1b2c3....mp4"
 
 这是**裸暴露在公网**的服务，请务必注意：
 
-1. **密钥不能泄露**。泄露等于把 GPU 免费送人。
-2. `/docs`（Swagger UI）默认开启，会暴露完整接口结构。生产使用建议关闭
-   （`FastAPI(docs_url=None, redoc_url=None)`）。
-3. 建议加前置限流或 IP 白名单；AutoDL 侧不提供这两项。
-4. 产物下载做了归属校验（文件名必须对应一个已成功登记的任务），
-   但产物名本身是随机 `task_id`，不要把它当强凭证。
+1. **两个密钥都不能泄露**。`API Key` 泄露等于把 GPU 免费送人；签名密钥
+   `.url_secret` 泄露则等于签名机制失效——任何人都能给任意文件名签发合法 URL。
+2. **接口文档默认已关闭**。`/docs`、`/redoc`、`/openapi.json` **三者一起关**。
+   只关前两个是不够的：`/openapi.json` 仍会把完整接口结构吐给公网。本地调试用
+   `LINLY_ENABLE_DOCS=1` 临时打开。
+3. **产物下载需要短期签名**，且所有失败**一律返回同一个 404**（签名无效 / 已过期 /
+   文件不存在 / 归属校验失败），不给未授权者任何「文件是否存在」的判断依据。
+   签名之外仍保留归属校验（文件名必须对应一个已成功登记的任务）作为第二道防线。
+4. **训练有并发闸门**（`LINLY_TRAIN_MAX_CONCURRENCY`，默认 1）。单卡上训练与推理互斥；
+   没有闸门时，拿到密钥的人可以无限提交训练任务把显存占满。
+5. 建议加前置限流或 IP 白名单；AutoDL 侧不提供这两项。
+6. **跨域默认关闭**（仅同源可用，与改造前一致）。需要浏览器前端跨域调用时才设
+   `LINLY_CORS_ORIGINS`，**不要填 `*`**——鉴权走自定义头，通配等于允许任意站点携带它发请求。
+
+### 已知不一致
+
+同一类错误在两条提交路径上返回码不同：`mode` 非法时，JSON 路径 `POST /api/v1/tasks`
+返回 **422**（`schemas.py` 里 `Mode` 是 `Literal`，由 Pydantic 在进路由前拦下），
+而 multipart 路径 `POST /api/v1/tasks/upload` 返回 **400**（走 `_validate_mode`）。
+属既有行为，调用方按各自路径处理即可。
 
 ## 当前实现状态
 

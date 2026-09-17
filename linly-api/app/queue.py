@@ -15,6 +15,7 @@ from pathlib import Path
 from . import config, storage
 from .adapter import BasePipeline
 from .schemas import TaskInfo, TaskStatus
+from .security import sign_result
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,23 @@ class TaskRecord:
             return None
         return round((self.finished_at or time.time()) - self.started_at, 1)
 
+    def signed_result_url(self, public_url: str) -> str:
+        """产物下载地址，带短期签名。
+
+        有效期取 `URL_TTL` 与**产物剩余寿命**的较小值。产物到期会被 `purge_expired`
+        删掉，若签名声明的有效期超过它，就会出现「链接名义上还有效、点下去却是 404」
+        的假承诺——而且调用方无法区分「签名过期」与「文件已删」。
+        """
+        name = self.result_path.name
+        exp = int(time.time()) + config.URL_TTL_SECONDS
+        if self.finished_at is not None:
+            exp = min(exp, int(self.finished_at) + config.TASK_TTL_SECONDS)
+        return f"{public_url}/api/v1/files/{name}?e={exp}&s={sign_result(name, exp)}"
+
     def to_info(self, public_url: str) -> TaskInfo:
         result_url = None
         if self.result_path is not None and self.status is TaskStatus.SUCCEEDED:
-            result_url = f"{public_url}/api/v1/files/{self.result_path.name}"
+            result_url = self.signed_result_url(public_url)
         return TaskInfo(
             task_id=self.task_id,
             status=self.status,

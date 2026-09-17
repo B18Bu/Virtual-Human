@@ -92,8 +92,11 @@ def render_one(segment: dict, prof: dict, pdir: Path, out: Path) -> Path:
             raise RuntimeError("渲染超时（15 分钟）")
         time.sleep(3)
 
-    # 立刻下载——产物 6 小时 TTL
-    req = urllib.request.Request(f"{dh.API_BASE}/api/v1/files/{tid}.mp4")
+    # 立刻下载——产物 6 小时 TTL。
+    # ⚠️ 不能自己拼 `{API_BASE}/api/v1/files/{tid}.mp4`：产物下载要签名，
+    # 自拼的 URL 没有签名会 404。用 dh.local_result_url() 从 result_url 换 host，
+    # 路径与签名（查询串）都照搬。
+    req = urllib.request.Request(dh.local_result_url(st))
     with urllib.request.urlopen(req, timeout=300) as r:
         out.write_bytes(r.read())
     return out

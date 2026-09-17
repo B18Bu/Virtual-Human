@@ -126,8 +126,15 @@ export BASE=http://127.0.0.1:6006          # 服务器本机
 export KEY=$(cat /root/autodl-tmp/linly-api/.api_key)
 ```
 
-**免鉴权端点**：`/`、`/ui`、`/api/v1/health`、`/api/v1/files/{文件名}`。
-最后一个是**有意的例外**：下载产物不需要 key，但文件名必须能反查到一个**成功**的任务——失败/取消任务的产物拿不到。
+**免鉴权端点**：`/`、`/ui`、`/api/v1/health`。
+
+**产物下载是个例外，但它也不「免鉴权」**：`/api/v1/files/{文件名}` 不用 `X-API-Key`，
+而是要求 URL 上带**短期签名**（`?e=<过期时间>&s=<签名>`）。原因很实际——
+`<video src>` 和 `<a href download>` 是浏览器发起的**裸导航，带不上自定义请求头**，
+用头部鉴权会把在线播放和下载按钮一起弄坏。
+
+**所以：一律用轮询返回的 `result_url` 原样下载，不要自己拼 URL。**
+签名有效期默认 1 小时；过期就重新拉一次任务状态取新 URL。
 
 ### 4.2 提交任务（方式一：上传图片文件）
 
@@ -188,8 +195,13 @@ curl -s "$BASE/api/v1/tasks/$TASK" -H "X-API-Key: $KEY"
 ### 4.5 下载产物
 
 ```bash
-curl -sO "$BASE/api/v1/files/0c71dbdebc764908.mp4"
+# 用任务状态里的 result_url 原样下载——下载签名就在那个 URL 的查询串里
+URL=$(curl -s "$BASE/api/v1/tasks/$TASK" -H "X-API-Key: $KEY" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["result_url"])')
+curl -sO "$URL"
 ```
+
+⚠️ **不要自己拼** `$BASE/api/v1/files/$TASK.mp4`——拼出来的没有签名，一律 404。
 
 ### 4.6 任务管理
 
@@ -351,8 +363,10 @@ while true; do
   sleep 5
 done
 
-# ③ 下载
-curl -sO "$BASE/api/v1/files/$TASK.mp4"
+# ③ 下载（用带签名的 result_url，不要自己拼路径）
+URL=$(curl -s "$BASE/api/v1/tasks/$TASK" -H "X-API-Key: $KEY" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["result_url"])')
+curl -sO "$URL"
 ls -la $TASK.mp4
 ```
 
@@ -544,7 +558,8 @@ Gradio（6008）加载的模型比 API 多。**先停 Gradio**，再跑 API 任�
 - ❌ **没有「注册音色」「选择说话人」端点**
 - ❌ **没有默认形象图**——每个任务必须带图
 - ⚠️ `outputs/verify/` 下的手工验收产物**不可下载**（文件名含 `/`，被安全校验拦掉）
-- ⚠️ `/docs`（Swagger）**默认开启**，公网可达。生产环境建议关掉
+- ✅ `/docs`（Swagger）**默认已关闭**（`/redoc`、`/openapi.json` 一并关）。本地调试用
+  `LINLY_ENABLE_DOCS=1` 启动才打开
 
 ---
 

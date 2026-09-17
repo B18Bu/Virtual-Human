@@ -79,10 +79,12 @@ def run_task(payload: dict, timeout: int = 900) -> tuple[bool, Path | None, str]
         time.sleep(3)
     if info.get("status") != "succeeded":
         return False, None, f"{info.get('status')}: {info.get('error')}"
-    # result_url 是公网地址，容器内解析不到，只取 path 走回环
-    path = urllib.parse.urlparse(info["result_url"]).path
+    # result_url 是公网地址，容器内解析不到，只取 path 走回环。
+    # ⚠️ **查询串必须保留**：产物下载要签名（?e=…&s=…），只取 .path 会 404。
+    u = urllib.parse.urlparse(info["result_url"])
+    path = u.path + (f"?{u.query}" if u.query else "")
     st, blob = api("GET", path)
-    ext = Path(path).suffix or ".mp4"
+    ext = Path(u.path).suffix or ".mp4"   # 用 u.path 取后缀，path 已被查询串污染
     dst = OUT / f"audit_{tid}{ext}"
     dst.write_bytes(blob)
     return True, dst, f"{len(blob)/1024:.0f} KB, {time.time()-t0:.1f}s"

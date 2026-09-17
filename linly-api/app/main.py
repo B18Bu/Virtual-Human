@@ -12,7 +12,8 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import config, storage
@@ -29,7 +30,13 @@ from .schemas import (
     VoiceInfo,
     VoiceStatus,
 )
-from .security import load_or_create_api_key, require_api_key
+from .security import (
+    is_valid_api_key,
+    load_or_create_api_key,
+    preload_secrets,
+    require_api_key,
+    verify_result,
+)
 from .voices import VoiceManager, VoiceRecord
 
 logging.basicConfig(
@@ -78,6 +85,10 @@ def probe_gpu() -> dict:
 async def lifespan(app: FastAPI):
     config.ensure_dirs()
 
+    # 一次性预加载 API Key 与签名密钥。**不要**留到请求里惰性加载：那是事件循环中的
+    # 阻塞文件 IO，且若密钥文件中途被删会静默重新生成，让所有在途下载 URL 集体失效。
+    preload_secrets()
+
     api_key = load_or_create_api_key()
     logger.info("=" * 68)
     logger.info("API Key: %s", api_key)
@@ -106,6 +117,14 @@ async def lifespan(app: FastAPI):
                 queue.purge_expired()
             except Exception:  # noqa: BLE001
                 logger.exception("清理过期任务时出错")
+            try:
+                # 训练中间产物可能有 GB 级，rmtree 会阻塞，丢到线程里做。
+                # 这里删的是**中间产物**，已注册的音色模型保留（见 voices.purge_expired）
+                n = await asyncio.to_thread(voices.purge_expired)
+                if n:
+                    logger.info("回收了 %d 份超期训练产物", n)
+            except Exception:  # noqa: BLE001
+                logger.exception("清理过期音色时出错")
 
     purge_task = asyncio.create_task(_purge_loop(), name="linly-purge")
 
@@ -113,7 +132,11 @@ async def lifespan(app: FastAPI):
     logger.info("Running on local URL:  http://%s:%d", config.HOST, config.PORT)
     if config.PUBLIC_URL:
         logger.info("公网入口: %s", config.PUBLIC_URL)
-    logger.info("接口文档: %s/docs （需通过网络可达；公网访问建议先关掉 docs）", config.PUBLIC_URL or "")
+    if config.ENABLE_DOCS:
+        logger.info("接口文档: %s/docs （LINLY_ENABLE_DOCS=1 已开启，公网部署建议关闭）",
+                    config.PUBLIC_URL or "")
+    else:
+        logger.info("接口文档已关闭（临时需要时用 LINLY_ENABLE_DOCS=1 启动）")
 
     try:
         yield
@@ -123,11 +146,16 @@ async def lifespan(app: FastAPI):
         await queue.stop()
 
 
+# 接口文档三件套**一起**开关。只关 docs_url/redoc_url 是不够的——/openapi.json
+# 仍会把完整接口结构吐给公网，那正是要防的东西。默认全关（config.ENABLE_DOCS 默认 False）。
 app = FastAPI(
     title="Linly-Talker API",
     description="数字人对话系统的外部 HTTP 接口。GPU 任务串行执行，提交后轮询取结果。",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if config.ENABLE_DOCS else None,
+    redoc_url="/redoc" if config.ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if config.ENABLE_DOCS else None,
 )
 
 
@@ -148,25 +176,51 @@ async def limit_request_size(request: Request, call_next):
     return await call_next(request)
 
 
+# --------------------------------------------------------------------- CORS
+# ⚠️ **注册位置有讲究**：Starlette 的 `add_middleware` 是 insert(0)，而中间件栈按
+# 逆序构建，所以**后 add 的在最外层**。这段必须放在 limit_request_size 之后，
+# 否则 CORS 沦为内层——被 413 挡下的请求将不带 CORS 头，浏览器只能报一句不透明的
+# 跨域错误，而不是干净的 413。
+#
+# ⚠️ `allow_methods` 的**默认值是 ("GET",)**！不显式给全的话，跨域 POST 的预检
+# 直接失败——而带 X-API-Key 自定义头的请求**必然**触发预检，等于跨域调用 100% 不可用。
+if config.CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.CORS_ORIGINS,
+        # 鉴权走自定义头 X-API-Key 而非 Cookie，不需要放行凭据。
+        # 这也让 allow_methods/allow_headers 的取值不受通配限制。
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["X-API-Key", "Content-Type"],
+        max_age=600,
+    )
+
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @app.get("/", include_in_schema=False)
 async def root() -> JSONResponse:
-    return JSONResponse(
-        {
-            "service": "Linly-Talker API",
-            "version": "1.0.0",
-            "ui": "/ui （浏览器效果页：上传图片 + 输入文本 → 生成 → 在线播放）",
-            "docs": "/docs",
-            "health": "/api/v1/health",
-            "submit": "POST /api/v1/tasks （JSON，需 X-API-Key）",
-            "submit_upload": "POST /api/v1/tasks/upload （multipart，需 X-API-Key）",
-            "poll": "GET /api/v1/tasks/{task_id}",
-            "voice_train": "POST /api/v1/voices （上传音频训练专属音色，需 X-API-Key）",
-            "voice_list": "GET /api/v1/voices",
-        }
-    )
+    """服务自述。
+
+    接口文档关闭时**不输出 docs 键**——而不是输出 `"docs": null`，
+    别让 JSON 形状暗示一个实际不存在的端点。
+    """
+    payload = {
+        "service": "Linly-Talker API",
+        "version": "1.0.0",
+        "ui": "/ui （浏览器效果页：上传图片 + 输入文本 → 生成 → 在线播放）",
+        "health": "/api/v1/health",
+        "submit": "POST /api/v1/tasks （JSON，需 X-API-Key）",
+        "submit_upload": "POST /api/v1/tasks/upload （multipart，需 X-API-Key）",
+        "poll": "GET /api/v1/tasks/{task_id}",
+        "voice_train": "POST /api/v1/voices （上传音频训练专属音色，需 X-API-Key）",
+        "voice_list": "GET /api/v1/voices",
+    }
+    if config.ENABLE_DOCS:
+        payload["docs"] = "/docs"
+    return JSONResponse(payload)
 
 
 @app.get("/ui", include_in_schema=False)
@@ -365,13 +419,29 @@ async def cancel_task(request: Request, task_id: str) -> dict:
 
 # --------------------------------------------------------------------- 产物下载
 @app.get("/api/v1/files/{filename}")
-async def download_result(request: Request, filename: str) -> FileResponse:
-    """下载产物。产物名是随机的 task_id，属于弱凭证，不足以替代鉴权，
-    因此这里额外做归属校验：文件名必须对应一个已成功登记的任务。"""
-    path = storage.resolve_result(filename)
+async def download_result(
+    request: Request,
+    filename: str,
+    e: int = Query(default=0, description="签名过期时间（Unix 秒）"),
+    s: str = Query(default="", description="HMAC-SHA256 签名"),
+) -> FileResponse:
+    """下载产物。**必须携带有效签名**：`?e=<过期时间>&s=<签名>`。
+
+    为什么用查询串签名而不是 X-API-Key：`<video src>` 与 `<a href download>` 都是
+    浏览器发起的**裸导航**，带不上自定义请求头，用头部鉴权会把在线播放和下载按钮
+    一起弄坏。签名放在查询串里，浏览器可以直接播，且链接到期即作废。
+
+    **所有失败一律返回同一个 404**（签名无效 / 已过期 / 文件不存在 / 归属校验失败），
+    理由：① 不给未授权者任何「这个文件到底存不存在」的判断依据；② `<video>` 本来就
+    无法从响应里区分 403 与 404（都是黑屏），区分它们没有收益。
+    """
     queue: TaskQueue = request.app.state.queue
+    # 先验签，再碰文件系统——resolve_result 内部的 is_file() 本身就是个存在性 oracle。
+    if not verify_result(filename, e, s):
+        raise HTTPException(status_code=404, detail="文件不存在或链接已过期")
+    path = storage.resolve_result(filename)
     if path is None or queue.find_by_result_name(filename) is None:
-        raise HTTPException(status_code=404, detail=f"文件 {filename} 不存在")
+        raise HTTPException(status_code=404, detail="文件不存在或链接已过期")
     return FileResponse(
         path,
         media_type="application/octet-stream",

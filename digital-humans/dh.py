@@ -25,6 +25,7 @@ import sys
 import tarfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import wave
 from pathlib import Path
@@ -41,6 +42,19 @@ IMAGE_SUFFIX = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
 # ---------------- 基础工具 ----------------
+
+def local_result_url(status: dict) -> str:
+    """把任务状态里的 `result_url` 换成本地回环地址。
+
+    两个原因不能直接用 `result_url`：① 它是**公网域名**，容器内解析不到；
+    ② 它带**下载签名**（`?e=…&s=…`），所以只换 host，**路径与查询串必须原样保留**。
+
+    也正因如此，不要再用 `f"{API_BASE}/api/v1/files/{tid}.mp4"` 那样自己拼——
+    拼出来的 URL 没有签名，服务端一律 404。
+    """
+    u = urllib.parse.urlparse(status["result_url"])
+    return f"{API_BASE}{u.path}?{u.query}"
+
 
 def api_key() -> str:
     return API_KEY_FILE.read_text(encoding="utf-8").strip()
@@ -373,9 +387,10 @@ def cmd_render(a):
             raise SystemExit(f"任务{s}：{st.get('error')}")
         time.sleep(3)
 
-    # result_url 是带公网域名的绝对 URL；走本地端点更快且不走公网
+    # result_url 是带公网域名 + 下载签名的绝对 URL；换成本地回环地址更快，
+    # 且签名照旧有效（见 local_result_url）
     out = Path(a.out).expanduser() if a.out else (d / "preview.mp4")
-    req = urllib.request.Request(f"{API_BASE}/api/v1/files/{tid}.mp4")
+    req = urllib.request.Request(local_result_url(st))
     with urllib.request.urlopen(req, timeout=300) as r:
         out.write_bytes(r.read())
 

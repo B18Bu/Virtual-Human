@@ -194,6 +194,59 @@ class VoiceManager:
     def list(self) -> list[VoiceRecord]:
         return sorted(self._records.values(), key=lambda r: r.created_at, reverse=True)
 
+    # ------------------------------------------------------------ 闸门与回收
+
+    def _ensure_train_slot(self) -> None:
+        """并发闸门（`LINLY_TRAIN_MAX_CONCURRENCY`）。
+
+        单卡上训练与推理互斥，多个训练同时跑会直接抢爆显存——而且症状是「任务莫名的
+        失败」而不是「被拒绝」，极难归因。所以宁可在这里明确拒绝。
+
+        ⚠️ 原先这个配置项**定义了却从未被使用**，等于没有闸门：拿到 API Key 的人可以
+        无限提交训练任务把显存占满（见台账 #2）。
+        """
+        limit = config.TRAIN_MAX_CONCURRENCY
+        if limit <= 0:
+            return
+        running = sum(1 for r in self._records.values()
+                      if r.status in (VoiceStatus.ASR, VoiceStatus.TRAINING))
+        if running >= limit:
+            raise ValueError(
+                f"已有 {running} 个训练在进行中"
+                f"（LINLY_TRAIN_MAX_CONCURRENCY={limit}），请等它跑完或先删除该音色")
+
+    def purge_expired(self) -> int:
+        """回收超期训练记录占用的磁盘（`LINLY_TRAIN_TTL`，默认 7 天）。
+
+        ⚠️ **只删中间产物（work_dir），保留已注册的模型（model_dir）**。
+        两个原因：
+          ① 空间大头是数据集 / HuBERT 特征 / 中间 ckpt，训练完就不再需要；
+          ② 注册好的音色可能正被数字人档案引用（`voice=finetuned:<名>`），
+             连同模型一起删会造成**静默损坏**——档案还在，渲染时才报找不到音色。
+
+        从未产出模型的记录（训练失败/中途放弃）则整体删除。
+        """
+        ttl = config.TRAIN_TTL_SECONDS
+        if ttl <= 0:
+            return 0
+        now = time.time()
+        purged = 0
+        for rec in list(self._records.values()):
+            if rec.status in (VoiceStatus.ASR, VoiceStatus.TRAINING):
+                continue                                  # 在跑的不动
+            basis = rec.finished_at or rec.created_at
+            if now - basis <= ttl:
+                continue
+            if (rec.model_dir / "sovits.pth").exists():
+                if rec.work_dir.exists():
+                    shutil.rmtree(rec.work_dir, ignore_errors=True)
+                    purged += 1
+                    logger.info("回收超期训练中间产物：%s", rec.voice_id)
+            else:
+                self.delete(rec)
+                purged += 1
+        return purged
+
     # ------------------------------------------------------------ 创建与执行
 
     async def create(self, voice_id: str, audio_path: Path, source_name: str, *,
@@ -202,6 +255,7 @@ class VoiceManager:
             raise ValueError(f"音色名 {voice_id!r} 已存在")
         if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", voice_id):
             raise ValueError("音色名只允许字母/数字/下划线，且不超过 32 字符")
+        self._ensure_train_slot()
 
         rec = VoiceRecord(voice_id=voice_id, source_name=source_name,
                           source_audio=str(audio_path), auto_train=auto_train,
@@ -240,6 +294,7 @@ class VoiceManager:
         """人工校对完成后，带着校对文件启动训练。"""
         if rec.status not in (VoiceStatus.REVIEWING, VoiceStatus.FAILED):
             raise ValueError(f"当前状态 {rec.status.value} 不能启动训练")
+        self._ensure_train_slot()
         if transcript is not None:
             rec.transcript_path.write_text(transcript, encoding="utf-8")
 

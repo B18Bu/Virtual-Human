@@ -1,9 +1,13 @@
 # ---- 密钥与凭据：绝不允许进仓库 ----
 .api_key
+.url_secret
 .webui_credentials
 *.token
 .github_token
 .env
+# 上面是精确名白名单，新增密钥文件忘了登记就会泄露。这两条通配兜底。
+.*_secret
+.*_key
 # LLM Key。live-commerce/ 自己也有一份同样的规则，这里是纵深防御：
 # 曾出过「修坏时的备份 llm_config.json.broken 同样含密钥却漏网」的事故，
 # 故用通配把 .broken / .bak 一类备份一并挡住。
